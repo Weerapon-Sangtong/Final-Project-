@@ -537,7 +537,7 @@ void parseScheduleFromWebSocket(String raw) {
 
       bool validHour = (parsedHour >= 0 && parsedHour <= 23);
       bool validMinute = (parsedMinute >= 0 && parsedMinute <= 59);
-      // กำหนดเป็น step ละ 10g ให้สอดคล้องกับ UI/ตารางให้อาหารที่ปรับครั้งละ 10g
+      // Keep 10g step size to match UI and scheduling controls (which adjust in 10g increments).
       bool validGram = (parsedGram >= MIN_SCHEDULE_GRAM && parsedGram <= MAX_SCHEDULE_GRAM && parsedGram % 10 == 0);
 
       if (validHour && validMinute && validGram) {
@@ -546,8 +546,12 @@ void parseScheduleFromWebSocket(String raw) {
         schedules[slot].gram = parsedGram;
         schedules[slot].active = true;
       } else {
-        DEBUG_PRINTF("⚠️ Invalid schedule slot %d ignored (hourOk=%d minuteOk=%d gramOk=%d): %s\n",
-                     slot + 1, validHour, validMinute, validGram, item.c_str());
+        DEBUG_PRINTF("⚠️ Invalid schedule slot %d ignored (hourOk=%s minuteOk=%s gramOk=%s): %s\n",
+                     slot + 1,
+                     validHour ? "true" : "false",
+                     validMinute ? "true" : "false",
+                     validGram ? "true" : "false",
+                     item.c_str());
       }
     }
     slot++;
