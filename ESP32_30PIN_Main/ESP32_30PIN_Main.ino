@@ -633,7 +633,6 @@ void sendWifiToCam() {
   if (WiFi.status() == WL_CONNECTED) {
     String ssid = wm.getWiFiSSID(true);
     String pass = wm.getWiFiPass(true);
-    if (ssid.length() == 0) return;
     String dataPacket = ssid + "," + pass + "\n";
     CamSerial.print(dataPacket);
     DEBUG_PRINTLN("📤 Sent WiFi to CAM (SSID: " + ssid + ", PASS_LEN: " + String(pass.length()) + ")");
