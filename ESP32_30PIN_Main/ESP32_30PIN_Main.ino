@@ -510,6 +510,9 @@ void checkStatusWifi() {
 }
 
 void parseScheduleFromWebSocket(String raw) {
+  const int MIN_SCHEDULE_GRAM = 10;
+  const int MAX_SCHEDULE_GRAM = 500;
+
   for (int i = 0; i < 3; i++) {
     schedules[i].active = false;
     schedules[i].hour = 0;
@@ -534,7 +537,7 @@ void parseScheduleFromWebSocket(String raw) {
 
       bool validHour = (parsedHour >= 0 && parsedHour <= 23);
       bool validMinute = (parsedMinute >= 0 && parsedMinute <= 59);
-      bool validGram = (parsedGram >= 10 && parsedGram <= 500 && parsedGram % 10 == 0);
+      bool validGram = (parsedGram >= MIN_SCHEDULE_GRAM && parsedGram <= MAX_SCHEDULE_GRAM && parsedGram % 10 == 0);
 
       if (validHour && validMinute && validGram) {
         schedules[slot].hour = parsedHour;
