@@ -528,10 +528,22 @@ void parseScheduleFromWebSocket(String raw) {
     int secondColon = item.lastIndexOf(':');
 
     if (firstColon > 0 && secondColon > firstColon) {
-      schedules[slot].hour = item.substring(0, firstColon).toInt();
-      schedules[slot].minute = item.substring(firstColon + 1, secondColon).toInt();
-      schedules[slot].gram = item.substring(secondColon + 1).toInt();
-      schedules[slot].active = true;
+      int parsedHour = item.substring(0, firstColon).toInt();
+      int parsedMinute = item.substring(firstColon + 1, secondColon).toInt();
+      int parsedGram = item.substring(secondColon + 1).toInt();
+
+      bool validHour = (parsedHour >= 0 && parsedHour <= 23);
+      bool validMinute = (parsedMinute >= 0 && parsedMinute <= 59);
+      bool validGram = (parsedGram >= 10 && parsedGram <= 500 && parsedGram % 10 == 0);
+
+      if (validHour && validMinute && validGram) {
+        schedules[slot].hour = parsedHour;
+        schedules[slot].minute = parsedMinute;
+        schedules[slot].gram = parsedGram;
+        schedules[slot].active = true;
+      } else {
+        DEBUG_PRINTF("⚠️ Invalid schedule slot %d ignored: %s\n", slot + 1, item.c_str());
+      }
     }
     slot++;
     start = end + 1;
@@ -621,9 +633,10 @@ void sendWifiToCam() {
   if (WiFi.status() == WL_CONNECTED) {
     String ssid = wm.getWiFiSSID(true);
     String pass = wm.getWiFiPass(true);
+    if (ssid.length() == 0) return;
     String dataPacket = ssid + "," + pass + "\n";
     CamSerial.print(dataPacket);
-    DEBUG_PRINTLN("📤 Sent WiFi to CAM: " + dataPacket);
+    DEBUG_PRINTLN("📤 Sent WiFi to CAM (SSID: " + ssid + ", PASS_LEN: " + String(pass.length()) + ")");
   }
 }
 
