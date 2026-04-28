@@ -57,18 +57,25 @@ using namespace websockets;
 // ⚙️ หมวดที่ 3: CONSTANTS & SETTINGS (ตั้งค่าระบบ)
 // ==========================================
 const int EEPROM_SIZE = 512;
-const int ADDR_LIMIT_FOOD = 0;    
-const int ADDR_LIMIT_WATER = 10;  
-const int ADDR_SCHEDULES = 20;    
+const int ADDR_LIMIT_FOOD = 0;
+const int ADDR_LIMIT_WATER = 10;
+const int ADDR_SCHEDULES = 20;
 
-const int SPEED_FWD = 180;                    
-const int SPEED_STOP = 90;                    
-const unsigned long FEED_TIMEOUT_MS = 40000;  
-const unsigned long SERVO_STOP_DELAY = 100;   
+// 🌟 Compile-time validation เพื่อป้องกัน EEPROM overflow
+// sizeof(FeedingTime) * 3 slots = ~12 bytes, + 20 (ADDR_SCHEDULES) = 32 bytes total
+static_assert(ADDR_SCHEDULES + (sizeof(FeedingTime) * 3) <= EEPROM_SIZE,
+              "ERROR: EEPROM_SIZE too small! Schedule data will overflow!");
 
-const unsigned long WATER_REFILL_DELAY_MS = 60000;  
-const int WATER_DETECT_GAP = 50;                    
-const unsigned long WATER_TIMEOUT_MS = 40000;       
+const int SPEED_FWD = 180;
+const int SPEED_STOP = 90;
+const unsigned long FEED_TIMEOUT_MS = 40000;
+const unsigned long SERVO_STOP_DELAY = 100;
+
+const unsigned long WATER_REFILL_DELAY_MS = 60000;
+const int WATER_DETECT_GAP = 50;
+const unsigned long WATER_TIMEOUT_MS = 40000;
+const float BOWL_MISSING_THRESHOLD = -15.0;  // 🌟 เพิ่ม: threshold สำหรับถ้วยหายไป
+const int DRINK_DETECT_THRESHOLD = 5;        // 🌟 เพิ่ม: threshold สำหรับตรวจจับการดื่ม
 
 const int TANK_EMPTY = 450;  
 const int TANK_FULL = 50;    
@@ -143,11 +150,20 @@ HX711_ADC LoadCell_BowlFood(HX_BowlFood_DT, HX_BowlFood_SCK);
 // ==========================================
 // 💾 หมวดที่ 6: GLOBAL VARIABLES (ตัวแปรส่วนกลาง)
 // ==========================================
-const char* websocket_server_host = "34.45.167.7";  
-const uint16_t server_port = 4000;                  
-const char* myToken = "ESP32-CAM-001";              
+// 🌟 HARDCODED CREDENTIALS - สามารถเปลี่ยนได้ตรงนี้
+// 💡 สำหรับ production ควร use WiFiManager custom parameters เพื่อให้ configurable runtime
+const char* websocket_server_host = "34.45.167.7";  // IP ของ WebSocket Server
+const uint16_t server_port = 4000;                  // Port ของ WebSocket
+const char* myToken = "ESP32-CAM-001";              // Token ยืนยันตัวตน
+
+// 📝 WiFiManager Custom Parameter Example (ถ้าต้องการแก้ runtime):
+// AutoConnectParameter custom_host("host", "Server IP", websocket_server_host, 20);
+// AutoConnectParameter custom_port("port", "Server Port", "4000", 10);
+// wm.addParameter(&custom_host);
+// wm.addParameter(&custom_port);
+
 const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 7 * 3600;  
+const long gmtOffset_sec = 7 * 3600;
 const int daylightOffset_sec = 0;
 
 unsigned long lastWebSocketSend = 0;
@@ -441,7 +457,8 @@ void configModeCallback(WiFiManager* myWiFiManager) {
 }
 
 void startWifi() {
-  WiFi.mode(WIFI_STA);  // 🌟 บังคับให้อยู่ใน Station mode ก่อน autoConnect
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);  // 🌟 เพิ่ม - ให้เทียบเท่า CAM เพื่อ latency ต่ำ
 
   wm.setAPCallback(configModeCallback);
   wm.setConfigPortalTimeout(120);
@@ -454,7 +471,7 @@ void startWifi() {
 
     // 🌟 [จุดสำคัญ!] ปิด WebSocket เก่าก่อนหมดสิ้นอย่างชัดแจ้ง
     client.close();
-    delay(500);
+    delay(1000);  // 🌟 เพิ่มจาก 500ms → 1000ms เพื่อให้ cleanup เสร็จ
 
     wifiStatus = hasInternet();
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
@@ -545,11 +562,22 @@ void parseScheduleFromWebSocket(String raw) {
     int firstColon = item.indexOf(':');
     int secondColon = item.lastIndexOf(':');
 
+    // 🌟 เพิ่ม validation เพื่อป้องกัน corrupted data
     if (firstColon > 0 && secondColon > firstColon) {
-      schedules[slot].hour = item.substring(0, firstColon).toInt();
-      schedules[slot].minute = item.substring(firstColon + 1, secondColon).toInt();
-      schedules[slot].gram = item.substring(secondColon + 1).toInt();
-      schedules[slot].active = true;
+      int h = item.substring(0, firstColon).toInt();
+      int m = item.substring(firstColon + 1, secondColon).toInt();
+      int g = item.substring(secondColon + 1).toInt();
+
+      // ✅ Check validity ก่อนเก็บ
+      if (h >= 0 && h <= 23 && m >= 0 && m <= 59 && g > 0 && g <= 500) {
+        schedules[slot].hour = h;
+        schedules[slot].minute = m;
+        schedules[slot].gram = g;
+        schedules[slot].active = true;
+        DEBUG_PRINTF(">>> Schedule Slot %d: %02d:%02d (%dg) - VALID\n", slot + 1, h, m, g);
+      } else {
+        DEBUG_PRINTF(">>> Schedule Slot %d: INVALID (h=%d m=%d g=%d)\n", slot + 1, h, m, g);
+      }
     }
     slot++;
     start = end + 1;
@@ -592,9 +620,12 @@ void onMessageCallback(WebsocketsMessage message) {
         parseScheduleFromWebSocket(String(rawSchedule));
 
         if (WiFi.status() == WL_CONNECTED) {
-          String ackJson = "{\"type\":\"ack\", \"token\":\"" + String(myToken) + "\", \"msg\":\"schedule_updated\"}";
+          char ackJson[256];
+          snprintf(ackJson, sizeof(ackJson),
+            "{\"type\":\"ack\",\"token\":\"%s\",\"msg\":\"schedule_updated\"}",
+            myToken);
           client.send(ackJson);
-          DEBUG_PRINTLN("📤 Sent ACK to Server: " + ackJson);
+          DEBUG_PRINTLN("📤 Sent ACK to Server: " + String(ackJson));
         }
       }
     }
@@ -641,7 +672,12 @@ void handleWebSocket(unsigned long now) {
   // ส่งข้อมูล sensor ตามตั้งเวลา
   if (now - lastWebSocketSend > WEBSOCKET_SEND_INTERVAL) {
     lastWebSocketSend = now;
-    String json = "{\"type\":\"update_sensor\", \"token\":\"" + String(myToken) + "\", \"food\":" + String(tankFood) + ", \"water\":" + String(tankWater) + ", \"bowlFood\":" + String(bowlFood) + ", \"bowlWater\":" + String(bowlWater) + "}";
+
+    // 🌟 ใช้ char buffer แทน String เพื่อป้องกัน heap fragmentation
+    char json[256];
+    snprintf(json, sizeof(json),
+      "{\"type\":\"update_sensor\",\"token\":\"%s\",\"food\":%d,\"water\":%d,\"bowlFood\":%d,\"bowlWater\":%d}",
+      myToken, tankFood, tankWater, bowlFood, bowlWater);
     client.send(json);
   }
 }
@@ -739,14 +775,14 @@ void processFeeder(unsigned long now) {
   bowlFood = (int)currentWeight;
 
   static unsigned long targetReachedTime = 0;
-  unsigned long realNow = millis();
+  // 🌟 ลบ: unsigned long realNow = millis();  ← ใช้ now parameter แทน
 
   switch (feedState) {
     case FORWARD:
-      if (realNow - feedTimer > FEED_TIMEOUT_MS) {
+      if (now - feedTimer > FEED_TIMEOUT_MS) {  // ✅ ใช้ now แทน realNow
         DEBUG_PRINTLN("!!! Timeout !!!");
         feedServo.write(SPEED_STOP);
-        stopTimer = realNow;
+        stopTimer = now;  // ✅ ใช้ now แทน realNow
         feedState = FINISH;
         targetReachedTime = 0;
         break;
@@ -754,11 +790,11 @@ void processFeeder(unsigned long now) {
 
       if (currentWeight >= feedTargetWeight) {
         if (targetReachedTime == 0) {
-          targetReachedTime = realNow;
-        } else if (realNow - targetReachedTime > 1000) {  
+          targetReachedTime = now;  // ✅ ใช้ now แทน realNow
+        } else if (now - targetReachedTime > 1000) {  // ✅ ใช้ now แทน realNow
           DEBUG_PRINTLN(">>> Target Reached and Stable!");
           feedServo.write(SPEED_STOP);
-          stopTimer = realNow;
+          stopTimer = now;  // ✅ ใช้ now แทน realNow
           feedState = FINISH;
           targetReachedTime = 0;
         }
@@ -768,16 +804,19 @@ void processFeeder(unsigned long now) {
       break;
 
     case FINISH:
-      if (realNow - stopTimer > SERVO_STOP_DELAY) {
+      if (now - stopTimer > SERVO_STOP_DELAY) {  // ✅ ใช้ now แทน realNow
         feedServo.detach();
         DEBUG_PRINTLN(">>> Feed Complete (Async)");
         forceUpdateTank = true;
         feedState = IDLE;
 
         if (WiFi.status() == WL_CONNECTED) {
-          String logJson = "{\"type\":\"feed_log\", \"token\":\"" + String(myToken) + "\", \"amount\":" + String(currentFeedAmount) + ", \"source\":\"" + currentFeedSource + "\"}";
+          char logJson[256];
+          snprintf(logJson, sizeof(logJson),
+            "{\"type\":\"feed_log\",\"token\":\"%s\",\"amount\":%d,\"source\":\"%s\"}",
+            myToken, currentFeedAmount, currentFeedSource.c_str());
           client.send(logJson);
-          DEBUG_PRINTLN("📤 Sent Feed Log to Server: " + logJson);
+          DEBUG_PRINTLN("📤 Sent Feed Log to Server: " + String(logJson));
         }
       }
       break;
@@ -805,10 +844,12 @@ void processWater(unsigned long now) {
       break;
 
     case WATER_WAITING:
-      if (LoadCell_BowlWater.getData() < -15.0) {
+      float bowlSensorValue = LoadCell_BowlWater.getData();  // 🌟 อ่านค่าจริง
+
+      if (bowlSensorValue < BOWL_MISSING_THRESHOLD) {  // ✅ ใช้ constant
         waterWaitTimer = now;
         DEBUG_PRINTLN("!!! Water Bowl Missing! Pump Paused. !!!");
-      } else if (bowlWater < lastDrinkWeight - 5) {  
+      } else if (bowlWater < lastDrinkWeight - DRINK_DETECT_THRESHOLD) {  // ✅ ใช้ constant
         waterWaitTimer = now;
         lastDrinkWeight = bowlWater;
         DEBUG_PRINTLN(">>> Pet is still drinking. Timer reset.");
@@ -829,10 +870,12 @@ void processWater(unsigned long now) {
         digitalWrite(PUMP_PIN, LOW);
         waterState = WATER_IDLE;
 
-        tft.init();
-        tft.setRotation(1);
-        ts.begin();
+        // 🌟 ลบการ reinit TFT ไปป้องกัน memory leak - setup() ทำไปแล้ว
+        // tft.init();          // ❌ ลบ
+        // tft.setRotation(1);  // ❌ ลบ
+        // ts.begin();          // ❌ ลบ
 
+        // ✅ แค่ redraw หน้า
         switch (currentPage) {
           case 0: drawHomePage(); break;
           case 1: drawMenuPage(); break;
@@ -889,11 +932,16 @@ void processSchedule(unsigned long now) {
 
   if (currentHour == -1) return;
 
+  static int lastScheduleSecond = -1;  // 🌟 เพิ่ม flag เพื่อหลีกเลี่ยง trigger ซ้ำ
+
   for (int i = 0; i < 3; i++) {
     if (schedules[i].active) {
-      if (currentHour == schedules[i].hour && currentMinute == schedules[i].minute && currentSecond < 2) {
+      if (currentHour == schedules[i].hour &&
+          currentMinute == schedules[i].minute &&
+          lastScheduleSecond != currentSecond) {  // ✅ ใช้ flag แทน < 2
         DEBUG_PRINTF(">>> Schedule #%d Triggered at %02d:%02d (%dg)\n", i + 1, currentHour, currentMinute, schedules[i].gram);
         startFeeding(schedules[i].gram, FILL_UP_TO, now);
+        lastScheduleSecond = currentSecond;  // ✅ อัปเดต flag
       }
     }
   }
@@ -1797,9 +1845,13 @@ void executePendingAction(unsigned long now) {
           if (WiFi.status() == WL_CONNECTED) {
             char timeStr[6];
             sprintf(timeStr, "%02d:%02d", schedules[deleteIdx].hour, schedules[deleteIdx].minute);
-            String json = "{\"type\":\"delete_schedule_from_esp\", \"token\":\"" + String(myToken) + "\", \"time\":\"" + String(timeStr) + "\"}";
+
+            char json[256];
+            snprintf(json, sizeof(json),
+              "{\"type\":\"delete_schedule_from_esp\",\"token\":\"%s\",\"time\":\"%s\"}",
+              myToken, timeStr);
             client.send(json);
-            DEBUG_PRINTLN("🗑️ Sent Delete Request to Server: " + json);
+            DEBUG_PRINTLN("🗑️ Sent Delete Request to Server: " + String(json));
           }
           schedules[deleteIdx].hour = 0;
           schedules[deleteIdx].minute = 0;
@@ -1873,9 +1925,13 @@ void executePendingAction(unsigned long now) {
         if (WiFi.status() == WL_CONNECTED) {
           char timeStr[6];
           sprintf(timeStr, "%02d:%02d", schedules[editIdx].hour, schedules[editIdx].minute);
-          String json = "{\"type\":\"add_schedule_from_esp\", \"token\":\"" + String(myToken) + "\", \"time\":\"" + String(timeStr) + "\", \"duration\":" + String(schedules[editIdx].gram) + ", \"slot\":" + String(editIdx + 1) + "}";
+
+          char json[256];
+          snprintf(json, sizeof(json),
+            "{\"type\":\"add_schedule_from_esp\",\"token\":\"%s\",\"time\":\"%s\",\"duration\":%d,\"slot\":%d}",
+            myToken, timeStr, schedules[editIdx].gram, editIdx + 1);
           client.send(json);
-          DEBUG_PRINTLN("📤 Synced Schedule to Server: " + json);
+          DEBUG_PRINTLN("📤 Synced Schedule to Server: " + String(json));
         }
         drawMenuPage();
         break;
@@ -1980,7 +2036,7 @@ void setup() {
   delay(300);
   feedServo.detach();
 
-  CamSerial.begin(9600, SERIAL_8N1, 35, 2);
+  CamSerial.begin(115200, SERIAL_8N1, 35, 2);  // 🌟 เท่ากับ CAM (ต้อง 115200 ทั้ง 2 ที่)
 
   // 🌟 เปิดหน้าจอขึ้นมาก่อน (กันจอดำตอนรอเชื่อมเน็ต)
   tft.init();

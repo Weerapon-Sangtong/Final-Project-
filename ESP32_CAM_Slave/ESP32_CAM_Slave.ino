@@ -34,9 +34,17 @@ WebsocketsClient client;
 // ==========================================
 // ⚙️ หมวดที่ 2: NETWORK & SERVER SETTINGS
 // ==========================================
+// 🌟 HARDCODED CREDENTIALS - สามารถเปลี่ยนได้ตรงนี้
+// 💡 สำหรับ production ควร use WiFiManager custom parameters เพื่อให้ configurable runtime
 const char* server_ip = "34.45.167.7";   // IP ของเซิร์ฟเวอร์
 const uint16_t server_port = 4000;       // Port สำหรับส่งข้อมูล
 const char* myToken = "ESP32-CAM-001";   // รหัสยืนยันตัวตนของกล้อง
+
+// 📝 WiFiManager Custom Parameter Example (ถ้าต้องการแก้ runtime):
+// AutoConnectParameter custom_host("host", "Server IP", server_ip, 20);
+// AutoConnectParameter custom_port("port", "Server Port", "4000", 10);
+// AutoConnectParameter custom_token("token", "Device Token", myToken, 32);
+// จากนั้น addParameter และอ่านค่าหลัง autoConnect
 
 // ==========================================
 // 🔌 หมวดที่ 3: CAMERA PIN DEFINITIONS (ขาอุปกรณ์ของเลนส์)
@@ -116,8 +124,11 @@ void init_camera() {
 
   // 💡 ถ้ากล้องพัง สายแพหลุด หรือลืมเปิด PSRAM มันจะทำงานเข้า if ตัวนี้แล้วจบการทำงานเลย
   if (esp_camera_init(&config) != ESP_OK) {
-    DEBUG_PRINTLN("❌ Camera Init Failed");
-    return;  
+    DEBUG_PRINTLN("❌ Camera Init Failed! System HALT");
+    while(1) {
+      delay(1000);  // 🌟 ค้างอยู่ที่นี่ - ป้องกันเข้า loop() เพราะจะ crash
+    }
+    return;
   }
   DEBUG_PRINTLN("✅ Camera Init OK");
 }
@@ -248,19 +259,29 @@ void processCameraStream(unsigned long now) {
 
 void checkWiFiStatus(unsigned long now) {
   // ทันทีที่ต่อเน็ตติดครั้งแรก ให้ปลุกระบบ OTA ขึ้นมารอ
-  if (WiFi.status() == WL_CONNECTED && !otaInitialized) {
-      ArduinoOTA.setHostname("Smart-Pet-ESP32-CAM");
-      ArduinoOTA.setPassword("1234");
-      
-      ArduinoOTA.onStart([]() {
-        DEBUG_PRINTLN("\n>>> Start OTA Update for CAM...");
-        isOTAUpdating = true; 
-        client.close(); // ปิดการสตรีมมิ่งทันทีเพื่อคืน RAM ให้ระบบ OTA     
-      });
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!otaInitialized) {
+        ArduinoOTA.setHostname("Smart-Pet-ESP32-CAM");
+        ArduinoOTA.setPassword("1234");
 
-      ArduinoOTA.begin();
-      otaInitialized = true;
-      DEBUG_PRINTLN("☁️ OTA Initialized for CAM");
+        ArduinoOTA.onStart([]() {
+          DEBUG_PRINTLN("\n>>> Start OTA Update for CAM...");
+          isOTAUpdating = true;
+          client.close(); // ปิดการสตรีมมิ่งทันทีเพื่อคืน RAM ให้ระบบ OTA
+        });
+
+        ArduinoOTA.begin();
+        otaInitialized = true;
+        DEBUG_PRINTLN("☁️ OTA Initialized for CAM");
+    }
+  } else {
+    // 🌟 [เพิ่มเติม] ลบ OTA state ถ้า WiFi disconnect
+    if (otaInitialized) {
+        ArduinoOTA.end();
+        otaInitialized = false;
+        DEBUG_PRINTLN("⚠️ OTA Ended (WiFi Disconnected)");
+    }
+    isConnectingWiFi = false;
   }
 
   if (isConnectingWiFi) {
@@ -268,9 +289,9 @@ void checkWiFiStatus(unsigned long now) {
       isConnectingWiFi = false;
       DEBUG_PRINTLN("✅ CAM_CONNECTED_TO_WIFI");
     }
-    // หมดเวลาพยายามต่อเน็ต (10 วิ) ให้หยุดพักป้องกันบอร์ดเอ๋อ
+    // หมดเวลาพยายามต่อเน็ต (30 วิ) ให้หยุดพักป้องกันบอร์ดเอ๋อ
     else if (now - wifiStartTime > WIFI_TIMEOUT_MS) {
-      isConnectingWiFi = false; 
+      isConnectingWiFi = false;
       DEBUG_PRINTLN("❌ WiFi Connection Timeout!");
     }
   }
