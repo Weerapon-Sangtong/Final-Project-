@@ -456,6 +456,47 @@ void configModeCallback(WiFiManager* myWiFiManager) {
   tft.println(WiFi.softAPIP());
 }
 
+<<<<<<< Updated upstream
+=======
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  (void)info;
+
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      DEBUG_PRINTLN("✅ WiFi Connected! Got IP");
+      forceCheckInternet = true;
+      ntpStarted = false;
+      // 🌟 Force WebSocket reconnect ทันที (ไม่ต้องรอ 10 วินาที)
+      lastWsConnect = millis() - WEBSOCKET_RETRY_INTERVAL - 1;
+      lastWebSocketSend = 0;
+      forceUpdateTank = true;  // 🌟 Force update tank level sensor เมื่อ WiFi reconnect
+      camSyncBurstLeft = 6;
+      lastCamSync = 0;
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      DEBUG_PRINTF("❌ WiFi Disconnected! Reason: %d\n", info.wifi_sta_disconnected.reason);
+      wifiStatus = false;
+      rtcBoot = false;
+      ntpStarted = false;
+      lastWsConnect = 0;  // 🌟 Reset to allow reconnect attempt
+      shouldCloseClient = true;
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_START:
+      DEBUG_PRINTLN("📡 WiFi STA Start");
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_STOP:
+      DEBUG_PRINTLN("📡 WiFi STA Stop");
+      break;
+
+    default:
+      break;
+  }
+}
+
+>>>>>>> Stashed changes
 void startWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // 🌟 เพิ่ม - ให้เทียบเท่า CAM เพื่อ latency ต่ำ
@@ -719,8 +760,28 @@ void checkESP32_RAM(unsigned long now) {
 }
 
 void startFeeding(int value, FeedMode mode, unsigned long now) {
+<<<<<<< Updated upstream
   if (maintenanceMode || tankFood <= 0) {
     DEBUG_PRINTLN("!!! BLOCKED: Maintenance Mode ON or Food Tank is EMPTY !!!");
+=======
+  if (maintenanceMode) {
+    DEBUG_PRINTLN("!!! BLOCKED: Maintenance Mode ON !!!");
+    currentFeedAmount = 0;
+    currentFeedSource = "";
+    return;
+  }
+
+  // 🌟 ถ้า tankFood = 0 ให้ force update sensor ทันที ไม่ต้องรอ loop
+  if (tankFood == 0) {
+    DEBUG_PRINTLN(">>> Tank Food = 0, force updating sensor...");
+    updateTankLevel();
+  }
+
+  if (tankFood <= 0) {
+    DEBUG_PRINTLN("!!! BLOCKED: Food Tank is EMPTY !!!");
+    currentFeedAmount = 0;
+    currentFeedSource = "";
+>>>>>>> Stashed changes
     return;
   }
 
