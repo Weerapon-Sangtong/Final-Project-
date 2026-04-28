@@ -73,7 +73,7 @@ const unsigned long WATER_TIMEOUT_MS = 40000;
 const int TANK_EMPTY = 450;  
 const int TANK_FULL = 50;    
 
-const unsigned long TANK_CHECK_INTERVAL_MS = 30000;    
+const unsigned long TANK_CHECK_INTERVAL_MS = 5000;     // 🌟 ลดจาก 30000 เป็น 5000 เพื่อตอบสนองเร็วขึ้น
 const unsigned long CAM_SYNC_INTERVAL = 60000;         
 const unsigned long DELAY_SCHEDUIE = 1000;             
 const unsigned long WEBSOCKET_SEND_INTERVAL = 3000;    
@@ -440,15 +440,33 @@ void configModeCallback(WiFiManager* myWiFiManager) {
   tft.println(WiFi.softAPIP());
 }
 
-void startWifi() { // 🌟 แก้ชื่อฟังก์ชันจาก starWifi เป็น startWifi ให้ถูกหลักไวยากรณ์ครับ
+void startWifi() {
+  WiFi.mode(WIFI_STA);  // 🌟 บังคับให้อยู่ใน Station mode ก่อน autoConnect
+
   wm.setAPCallback(configModeCallback);
-  wm.setConfigPortalTimeout(120);  
+  wm.setConfigPortalTimeout(120);
   bool connected = wm.autoConnect("Smart Pet Feeder");
+
   if (connected) {
+    Serial.println("WiFi Connected");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    // 🌟 [จุดสำคัญ!] ปิด WebSocket เก่าก่อนหมดสิ้นอย่างชัดแจ้ง
+    client.close();
+    delay(500);
+
     wifiStatus = hasInternet();
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     ntpStarted = true;
-    sendWifiToCam();  
+
+    // 🌟 บังคับให้อ่าน Tank ใหม่ทันทีแทนการรอ 30 วิ
+    forceUpdateTank = true;
+
+    sendWifiToCam();
+  } else {
+    Serial.println("WiFi Connect Failed");
+    ESP.restart();
   }
 }
 
@@ -587,33 +605,44 @@ void onMessageCallback(WebsocketsMessage message) {
 }
 
 void handleWebSocket(unsigned long now) {
-  if (WiFi.status() == WL_CONNECTED) {
-    static unsigned long lastWsConnect = 0;
+  if (WiFi.status() != WL_CONNECTED) {
+    client.close();
+    return;
+  }
 
-    if (client.available()) {
-      client.poll();
-    }
+  static unsigned long lastWsConnect = 0;
 
-    if (!client.available()) {
-      if (now - lastWsConnect > WEBSOCKET_RETRY_INTERVAL) {
-        lastWsConnect = now;
-        DEBUG_PRINTLN("Connecting to WebSocket...");
-        bool connected = client.connect(websocket_server_host, server_port, "/");
-        if (connected) {
-          DEBUG_PRINTLN("✅ WebSocket Connected!");
-          client.send("{\"type\":\"register\", \"token\":\"" + String(myToken) + "\"}");
-          client.onMessage(onMessageCallback);
-        } else {
-          DEBUG_PRINTLN("❌ WebSocket Connect Failed");
-        }
-      }
-    } else {
-      if (now - lastWebSocketSend > WEBSOCKET_SEND_INTERVAL) {
-        lastWebSocketSend = now;
-        String json = "{\"type\":\"update_sensor\", \"token\":\"" + String(myToken) + "\", \"food\":" + String(tankFood) + ", \"water\":" + String(tankWater) + ", \"bowlFood\":" + String(bowlFood) + ", \"bowlWater\":" + String(bowlWater) + "}";
-        client.send(json);
+  // ถ้าไม่มีการเชื่อมต่อ ให้พยายาม reconnect ทุก 5 วิ
+  if (!client.available()) {
+    if (now - lastWsConnect > WEBSOCKET_RETRY_INTERVAL) {
+      lastWsConnect = now;
+
+      DEBUG_PRINTLN(">>> Reconnecting WebSocket (Force Close)...");
+
+      // 🌟 ปิด connection เก่าอย่างชัดแจ้ง ไม่ใช่แค่รอ
+      client.close();
+      delay(300);
+
+      bool connected = client.connect(websocket_server_host, server_port, "/");
+      if (connected) {
+        DEBUG_PRINTLN("✅ WebSocket Connected!");
+        client.send("{\"type\":\"register\", \"token\":\"" + String(myToken) + "\"}");
+        client.onMessage(onMessageCallback);
+      } else {
+        DEBUG_PRINTLN("❌ WebSocket Connect Failed");
       }
     }
+    return;  // ออกจากฟังก์ชัน ถ้ายังไม่เชื่อมต่อ
+  }
+
+  // ถ้าเชื่อมต่ออยู่ ให้ poll ข้อมูล
+  client.poll();
+
+  // ส่งข้อมูล sensor ตามตั้งเวลา
+  if (now - lastWebSocketSend > WEBSOCKET_SEND_INTERVAL) {
+    lastWebSocketSend = now;
+    String json = "{\"type\":\"update_sensor\", \"token\":\"" + String(myToken) + "\", \"food\":" + String(tankFood) + ", \"water\":" + String(tankWater) + ", \"bowlFood\":" + String(bowlFood) + ", \"bowlWater\":" + String(bowlWater) + "}";
+    client.send(json);
   }
 }
 
@@ -1987,6 +2016,9 @@ void setup() {
   loadCellBowlWater();
   loadCellTankWater();
   vl53l0xFood();
+
+  // 🌟 อ่าน Tank level ทันทีตอนเปิดเครื่อง ไม่ให้ค้างที่ 0%
+  updateTankLevel();
 
   client.onMessage(onMessageCallback);
 

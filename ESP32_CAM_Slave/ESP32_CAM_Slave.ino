@@ -63,10 +63,10 @@ const char* myToken = "ESP32-CAM-001";   // รหัสยืนยันตั
 // ==========================================
 // ⏱️ หมวดที่ 4: TIMERS & VARIABLES (ตัวแปรระบบ)
 // ==========================================
-const int captureInterval = 50;                    // ความถี่การส่งภาพ (50ms = 20 เฟรมต่อวินาที เน้นเสถียร)
+const int captureInterval = 100;                    // ความถี่การส่งภาพ (100ms = 10 เฟรมต่อวินาที เน้นเสถียร)
 const unsigned long FLASH_DURATION = 1000;         // เวลาเปิดไฟแฟลช (1000ms = 1 วินาที)
 const unsigned long WS_RECONNECT_INTERVAL = 5000;  // ดีเลย์รอต่อ WebSocket ใหม่ (5 วินาที)
-const unsigned long WIFI_TIMEOUT_MS = 10000;       // เวลาสูงสุดในการพยายามเชื่อม WiFi (10 วินาที)
+const unsigned long WIFI_TIMEOUT_MS = 30000;       // เวลาสูงสุดในการพยายามเชื่อม WiFi (30 วินาที)
 
 String currentSSID = "";
 String currentPASS = "";
@@ -128,21 +128,25 @@ void connectToWiFi(String ssid, String pass) {
   // ดักจับ: ถ้าส่งรหัสเดิมมา แล้วบอร์ดกำลังต่อเน็ตอยู่ ให้ข้ามไปเลย
   if (ssid == currentSSID && (WiFi.status() == WL_CONNECTED || isConnectingWiFi)) return;
 
+  // 🌟 [จุดสำคัญ!] ปิด WebSocket เก่าก่อนการเชื่อม WiFi ใหม่
+  client.close();
+  delay(500);
+
   // 🌟 บังคับให้ลืม IP เดิม เพื่อไปขอ IP ใหม่จากเราเตอร์ตัวใหม่
   WiFi.config(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0));
-  
+
   // 🌟 สูตรลับความลื่น: บังคับโหมดลูกข่าย และไม่ให้ WiFi แอบหลับ (ช่วยให้สตรีมไม่กระตุก)
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
 
-  WiFi.disconnect();                       
-  WiFi.begin(ssid.c_str(), pass.c_str());  
+  WiFi.disconnect();
+  WiFi.begin(ssid.c_str(), pass.c_str());
 
   currentSSID = ssid;
   currentPASS = pass;
   isConnectingWiFi = true;
   wifiStartTime = millis();
-  
+
   DEBUG_PRINTF(">>> 📡 Connecting to WiFi: %s\n", ssid.c_str());
 }
 
@@ -197,25 +201,38 @@ void checkSerialWiFi() {
 
 // 💡 ฟังก์ชันหัวใจหลัก: จัดการสตรีมวิดีโอ
 void processCameraStream(unsigned long now) {
-  if (WiFi.status() != WL_CONNECTED) return;  
+  if (WiFi.status() != WL_CONNECTED) {
+    client.close();
+    return;
+  }
 
   static unsigned long lastWsConnect = 0;
-  
+
   // 1. เช็คว่าหลุดจากเซิร์ฟเวอร์ไหม ถ้าหลุดให้พยายามต่อใหม่
   if (!client.available()) {
-    if (now - lastWsConnect > WS_RECONNECT_INTERVAL) {  
+    if (now - lastWsConnect > WS_RECONNECT_INTERVAL) {
       lastWsConnect = now;
-      DEBUG_PRINTLN(">>> 🌐 Connecting to Camera WebSocket...");
+
+      DEBUG_PRINTLN(">>> 🌐 Reconnecting to Camera WebSocket (Force Close)...");
+
+      // 🌟 ปิด connection เก่าอย่างชัดแจ้ง ไม่ใช่แค่รอ
+      client.close();
+      delay(300);
+
       if (client.connect(server_ip, server_port, "/")) {
         client.send("{\"type\":\"register\", \"token\":\"" + String(myToken) + "\"}");
         DEBUG_PRINTLN("✅ Camera WebSocket Connected!");
+      } else {
+        DEBUG_PRINTLN("❌ Camera WebSocket Connect Failed");
       }
     }
-  } else {
-    client.poll();  // รับข้อมูลขาเข้า
+    return;  // ออกจากฟังก์ชัน ถ้ายังไม่เชื่อมต่อ
   }
 
-  // 2. จับภาพและยิงขึ้นเซิร์ฟเวอร์ตามรอบเวลา (captureInterval)
+  // 2. ถ้าเชื่อมต่ออยู่ ให้ poll ข้อมูล
+  client.poll();
+
+  // 3. จับภาพและยิงขึ้นเซิร์ฟเวอร์ตามรอบเวลา (captureInterval)
   if (now - lastCaptureTime > captureInterval) {
     lastCaptureTime = now;
 
@@ -293,8 +310,12 @@ void setup() {
   // 🌟 ปิดระบบเซนเซอร์ไฟกระชาก (Brown-out detector) เพื่อกันบอร์ดดับตอนกล้องดึงกระแสไฟ
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
-  Serial.begin(9600);    // 💡 ห้ามใช้ DEBUG_PRINT ตรงนี้ เพราะต้องเอาไว้อ่านค่า WiFi จากบอร์ดแม่จริงๆ
+  Serial.begin(115200);  // 🌟 เพิ่มความเร็วจาก 9600 เป็น 115200 เพื่อลด latency
   Serial.setTimeout(10); // ลดเวลา Timeout ป้องกันบอร์ดค้างเวลารอรับ Serial
+
+  // 🌟 เปิด WiFi auto-reconnect ที่ระดับ OS
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
 
   pinMode(FLASH_GPIO_NUM, OUTPUT);
   digitalWrite(FLASH_GPIO_NUM, LOW);
