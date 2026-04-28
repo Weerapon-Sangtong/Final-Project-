@@ -2,10 +2,6 @@
 // 🐾 SMART PET FEEDER - MASTER FIRMWARE (ESP32 30-PIN)
 // ============================================================================
 
-// ==========================================
-// 🔴 หมวดที่ 0: MASTER DEBUG SWITCH (สวิตช์เปิด/ปิด ข้อความหลังบ้าน)
-// ==========================================
-// 💡 เปลี่ยนเป็น 1 = เปิดข้อความ Debug, เปลี่ยนเป็น 0 = ปิดข้อความทั้งหมดเพื่อประหยัด RAM
 #define DEBUG_MODE 1
 
 #if DEBUG_MODE == 1
@@ -18,9 +14,6 @@
 #define DEBUG_PRINTF(...)
 #endif
 
-// ==========================================
-// 📚 หมวดที่ 1: LIBRARIES (เรียกใช้ไลบรารี)
-// ==========================================
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <ArduinoWebsockets.h>
@@ -37,12 +30,11 @@
 #include <ESP32Servo.h>
 #include <VL53L0X.h>
 #include <HX711_ADC.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 
 using namespace websockets;
 
-// ==========================================
-// 🔌 หมวดที่ 2: PIN DEFINITIONS (กำหนดขาอุปกรณ์)
-// ==========================================
 #define SERVO_PIN 13  
 #define PUMP_PIN 12   
 
@@ -53,9 +45,6 @@ using namespace websockets;
 #define HX_BowlFood_DT 32  
 #define HX_BowlFood_SCK 33
 
-// ==========================================
-// ⚙️ หมวดที่ 3: CONSTANTS & SETTINGS (ตั้งค่าระบบ)
-// ==========================================
 const int EEPROM_SIZE = 512;
 const int ADDR_LIMIT_FOOD = 0;    
 const int ADDR_LIMIT_WATER = 10;  
@@ -73,9 +62,9 @@ const unsigned long WATER_TIMEOUT_MS = 40000;
 const int TANK_EMPTY = 450;  
 const int TANK_FULL = 50;    
 
-const unsigned long TANK_CHECK_INTERVAL_MS = 5000;     // 🌟 ลดจาก 30000 เป็น 5000 เพื่อตอบสนองเร็วขึ้น
+const unsigned long TANK_CHECK_INTERVAL_MS = 5000;  // 🌟 ปรับให้เช็คทุก 5 วินาที
 const unsigned long CAM_SYNC_INTERVAL = 60000;         
-const unsigned long DELAY_SCHEDUIE = 1000;             
+const unsigned long DELAY_SCHEDULE = 1000;             
 const unsigned long WEBSOCKET_SEND_INTERVAL = 3000;    
 const unsigned long WEBSOCKET_RETRY_INTERVAL = 10000;  
 const unsigned long END_DELAY_NET_CHECK = 60000;
@@ -96,26 +85,9 @@ const uint16_t TFT_LIGHTGREEN = 0x9772;
 String currentFeedSource = "";  
 int currentFeedAmount = 0;      
 
-// ==========================================
-// 📦 หมวดที่ 4: DATA TYPES (โครงสร้างสถานะต่างๆ)
-// ==========================================
-enum FeedMode {
-  FILL_UP_TO,  
-  ADD_MORE     
-};
-
-enum FeederState {
-  IDLE,
-  FORWARD,
-  REVERSE,
-  FINISH
-};
-
-enum WaterState {
-  WATER_IDLE,
-  WATER_WAITING,
-  WATER_PUMPING
-};
+enum FeedMode { FILL_UP_TO, ADD_MORE };
+enum FeederState { IDLE, FORWARD, REVERSE, FINISH };
+enum WaterState { WATER_IDLE, WATER_WAITING, WATER_PUMPING };
 
 struct FeedingTime {
   int hour = 0;         
@@ -124,9 +96,6 @@ struct FeedingTime {
   bool active = false;  
 };
 
-// ==========================================
-// 🛠️ หมวดที่ 5: OBJECT INSTANTIATIONS (สร้างอ็อบเจกต์)
-// ==========================================
 HardwareSerial CamSerial(2);  
 WebsocketsClient client;
 WiFiManager wm;
@@ -140,23 +109,29 @@ HX711_ADC LoadCell_BowlWater(HX_BowlWater_DT, HX_BowlWater_SCK);
 HX711_ADC LoadCell_TankWater(HX_TankWater_DT, HX_TankWater_SCK);
 HX711_ADC LoadCell_BowlFood(HX_BowlFood_DT, HX_BowlFood_SCK);
 
-// ==========================================
-// 💾 หมวดที่ 6: GLOBAL VARIABLES (ตัวแปรส่วนกลาง)
-// ==========================================
 const char* websocket_server_host = "34.45.167.7";  
 const uint16_t server_port = 4000;                  
-const char* myToken = "ESP32-CAM-001";              
+char myToken[30] = "ESP32-CAM-001";        
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 7 * 3600;  
 const int daylightOffset_sec = 0;
 
+RTC_DATA_ATTR int bootStatusFlag = 0; 
+bool needRebootAfterWiFi = false;     
+bool serverStatus = false;            
+
 unsigned long lastWebSocketSend = 0;
 unsigned long lastCamSync = 0;
+uint8_t camSyncBurstLeft = 0;
 unsigned long startDelayNetCheck = 0;
 unsigned long startDelayWifiRetry = 0;
 bool wifiStatus = false;
 bool lastWifiStatus = false;
 bool ntpStarted = false;
+bool forceCheckInternet = false;  
+bool shouldCloseClient = false;   
+bool configModeShown = false;     
+unsigned long lastWsConnect = 0;
 
 bool maintenanceMode = false;  
 int actionButton = 0;
@@ -171,6 +146,7 @@ FeedingTime schedules[3];
 int editIdx = 0;           
 int confirmMode = 0;       
 int deleteIdx = 0;         
+unsigned long lastScheduleTriggerKey[3] = {0, 0, 0};
 
 int limitBowlFood = 100;  
 int bowlFood = 0;         
@@ -195,92 +171,75 @@ const int waterTankMin = 0;
 WaterState waterState = WATER_IDLE;
 unsigned long pumpTimer = 0;
 unsigned long waterWaitTimer = 0;
+bool waterBowlSensorValid = false;
+unsigned long lastWaterSensorCheck = 0;  
+bool waterPumpFault = false;
+unsigned long waterFaultTimer = 0;
+const unsigned long WATER_RETRY_COOLDOWN_MS = 300000;
+const unsigned long WATER_SENSOR_TIMEOUT_MS = 5000;  
 
-
-// ============================================================================
-// ======================= 🔧 หมวดที่ 7: UTILITIES & EEPROM =====================
-// ============================================================================
 bool hasInternet() {
   WiFiClient client;
   return client.connect("8.8.8.8", 53);
 }
 
 void saveSettings() {
+  if (limitBowlFood < 50 || limitBowlFood > 5000) limitBowlFood = 100;
+  if (limitBowlWater < 50 || limitBowlWater > 5000) limitBowlWater = 100;
   EEPROM.put(ADDR_LIMIT_FOOD, limitBowlFood);
   EEPROM.put(ADDR_LIMIT_WATER, limitBowlWater);
   EEPROM.put(ADDR_SCHEDULES, schedules);
   EEPROM.commit();
-  DEBUG_PRINTLN(">>> Settings Saved to EEPROM");
 }
 
 void loadSettings() {
   EEPROM.get(ADDR_LIMIT_FOOD, limitBowlFood);
   EEPROM.get(ADDR_LIMIT_WATER, limitBowlWater);
   EEPROM.get(ADDR_SCHEDULES, schedules);
-
-  if (limitBowlFood < 50 || limitBowlFood > 5000 || limitBowlFood % 100 != 0) {
-    limitBowlFood = 100;
-    DEBUG_PRINTLN(">>> Invalid Food Limit! Reset to 100.");
-  }
-
-  if (limitBowlWater < 50 || limitBowlWater > 5000 || limitBowlWater % 100 != 0) {
-    limitBowlWater = 100;
-    DEBUG_PRINTLN(">>> Invalid Water Limit! Reset to 100.");
-  }
+  if (limitBowlFood < 50 || limitBowlFood > 5000 || limitBowlFood % 100 != 0) limitBowlFood = 100;
+  if (limitBowlWater < 50 || limitBowlWater > 5000 || limitBowlWater % 100 != 0) limitBowlWater = 100;
 
   for (int i = 0; i < 3; i++) {
     bool timeInvalid = (schedules[i].hour > 23 || schedules[i].minute > 59);
     bool gramInvalid = (schedules[i].gram <= 0 || schedules[i].gram > 500 || schedules[i].gram % 10 != 0);
-
     if (timeInvalid || gramInvalid) {
       schedules[i].hour = 0;
       schedules[i].minute = 0;
       schedules[i].gram = 10;
       schedules[i].active = false;
-      DEBUG_PRINTF(">>> Slot %d corrupted! Resetting to default.\n", i + 1);
     }
   }
-  DEBUG_PRINTLN(">>> Settings Loaded & Filtered");
 }
 
-// ============================================================================
-// =================== ⚖️ หมวดที่ 8: HARDWARE & SENSORS CONFIG ==================
-// ============================================================================
 void rtcStart() {
   if (!rtc.begin()) {
     checkRtc = false;
   } else {
     checkRtc = true;
-    if (rtc.lostPower()) {
-      DEBUG_PRINTLN("RTC lost power, let's set the time!");
-    }
+    if (rtc.lostPower()) DEBUG_PRINTLN("RTC lost power, let's set the time!");
   }
 }
 
 void syncSystemTimeFromRtc() {
   if (!checkRtc) return;
   DateTime now = rtc.now();
-
-  struct tm timeinfo;
+  struct tm timeinfo = {};
   timeinfo.tm_year = now.year() - 1900;
   timeinfo.tm_mon = now.month() - 1;
   timeinfo.tm_mday = now.day();
   timeinfo.tm_hour = now.hour();
   timeinfo.tm_min = now.minute();
   timeinfo.tm_sec = now.second();
-
+  timeinfo.tm_isdst = 0;
   struct timeval tv;
   tv.tv_sec = mktime(&timeinfo);
   tv.tv_usec = 0;
   settimeofday(&tv, NULL);
-  DEBUG_PRINTLN(">>> System Time Synced from RTC (No WiFi needed)");
 }
 
 void vl53l0xFood() {
   tankSensor.setTimeout(500);
-  if (tankSensor.init()) {
-    tankSensor.stopContinuous();
-  }
+  if (tankSensor.init()) tankSensor.stopContinuous();
 }
 
 void loadCellBowlFood() {
@@ -288,7 +247,7 @@ void loadCellBowlFood() {
   LoadCell_BowlFood.start(2000, false);
   LoadCell_BowlFood.setTareOffset(8921119);
   LoadCell_BowlFood.setCalFactor(420.0);
-  LoadCell_BowlFood.setSamplesInUse(32);
+  LoadCell_BowlFood.setSamplesInUse(4); 
 }
 
 void loadCellBowlWater() {
@@ -308,11 +267,9 @@ void loadCellTankWater() {
 }
 
 void updateTankLevel() {
-  DEBUG_PRINTLN(">>> Checking Tank Level (Advanced Filter)...");
   tankSensor.startContinuous();
   long totalDistance = 0;
   int validReadings = 0;
-
   for (int i = 0; i < 10; i++) {
     int distance = tankSensor.readRangeContinuousMillimeters();
     if (distance > 10 && distance < 8000 && distance < (TANK_EMPTY + 100)) {
@@ -326,24 +283,10 @@ void updateTankLevel() {
   if (validReadings > 0) {
     int currentDistance = totalDistance / validReadings;
     static int smoothDistance = -1;
-    if (smoothDistance == -1) {
-      smoothDistance = currentDistance;
-    } else {
-      smoothDistance = (smoothDistance * 0.7) + (currentDistance * 0.3);
-    }
-    DEBUG_PRINT("Raw: ");
-    DEBUG_PRINT(currentDistance);
-    DEBUG_PRINT("mm | Smooth: ");
-    DEBUG_PRINT(smoothDistance);
-    DEBUG_PRINTLN("mm");
-
+    if (smoothDistance == -1) smoothDistance = currentDistance;
+    else smoothDistance = (smoothDistance * 0.7) + (currentDistance * 0.3);
     int percent = map(smoothDistance, TANK_EMPTY, TANK_FULL, 0, 100);
     tankFood = constrain(percent, 0, 100);
-    DEBUG_PRINT("Final Food: ");
-    DEBUG_PRINT(tankFood);
-    DEBUG_PRINTLN("%");
-  } else {
-    DEBUG_PRINTLN("Error: Sensor blocked or out of range!");
   }
 }
 
@@ -360,14 +303,23 @@ void vl53l0xFoodWork(unsigned long now) {
     updateTankLevel();
     forceUpdateTank = false;
     lastPeriodicCheck = now;
-    DEBUG_PRINTLN(">>> Tank Level Updated (Dispensed/Timer/Manual)");
   }
 }
 
 void loadCellWaterBowlWork() {
+  if (waterBowlSensorValid) {
+    if (millis() - lastWaterSensorCheck > WATER_SENSOR_TIMEOUT_MS) lastWaterSensorCheck = millis();
+  } else {
+    lastWaterSensorCheck = millis();
+  }
+
   if (LoadCell_BowlWater.update()) {
     bowlWater = (int)LoadCell_BowlWater.getData();
     if (bowlWater < 0) bowlWater = 0;
+    waterBowlSensorValid = true;
+    lastWaterSensorCheck = millis();  
+  } else if (millis() - lastWaterSensorCheck > WATER_SENSOR_TIMEOUT_MS) {
+    waterBowlSensorValid = false;  
   }
 }
 
@@ -380,9 +332,10 @@ void loadCellWaterTankWork() {
   }
 }
 
-// ============================================================================
-// ==================== 🌐 หมวดที่ 9: NETWORK & WEBSOCKET =======================
-// ============================================================================
+void saveConfigCallback() {
+  DEBUG_PRINTLN(">>> New WiFi saved! Flagging for reboot...");
+  needRebootAfterWiFi = true;
+}
 
 void resetWiFi() {
   tft.fillScreen(TFT_RED);
@@ -392,9 +345,6 @@ void resetWiFi() {
   tft.println("RESETTING WIFI...");
   delay(1000);
 
-  DEBUG_PRINTLN(">>> Graceful Shutdown Started...");
-
-  // 🌟 [จุดสำคัญ!] สั่งหารให้บอร์ดกล้องรีบูทตามไปพร้อมกัน จะได้ไม่ค้างคาเน็ตตัวเก่า!
   CamSerial.println("REBOOT_CAM");
   delay(500);
 
@@ -405,22 +355,26 @@ void resetWiFi() {
   digitalWrite(PUMP_PIN, LOW);
   feedServo.detach();
 
-  pinMode(HX_BowlWater_SCK, OUTPUT);
-  digitalWrite(HX_BowlWater_SCK, HIGH);
-  pinMode(HX_TankWater_SCK, OUTPUT);
-  digitalWrite(HX_TankWater_SCK, HIGH);
-  pinMode(HX_BowlFood_SCK, OUTPUT);
-  digitalWrite(HX_BowlFood_SCK, HIGH);
+  pinMode(HX_BowlWater_SCK, OUTPUT); digitalWrite(HX_BowlWater_SCK, HIGH);
+  pinMode(HX_TankWater_SCK, OUTPUT); digitalWrite(HX_TankWater_SCK, HIGH);
+  pinMode(HX_BowlFood_SCK, OUTPUT); digitalWrite(HX_BowlFood_SCK, HIGH);
   delay(100);
 
   wm.resetSettings();
-  delay(500);  
+  delay(500);
 
-  DEBUG_PRINTLN(">>> Rebooting ESP32...");
+  configModeShown = false;
+  forceCheckInternet = false;
+  shouldCloseClient = false;
+
+  bootStatusFlag = 1; 
   ESP.restart();
 }
 
 void configModeCallback(WiFiManager* myWiFiManager) {
+  if (configModeShown) return;
+  configModeShown = true;
+
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(60, 30);
   tft.setTextSize(3);
@@ -440,33 +394,80 @@ void configModeCallback(WiFiManager* myWiFiManager) {
   tft.println(WiFi.softAPIP());
 }
 
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  (void)info;
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      forceCheckInternet = true;
+      ntpStarted = false;
+      lastWsConnect = 0;  
+      lastWebSocketSend = 0;  
+      shouldCloseClient = true;
+      camSyncBurstLeft = 6;
+      lastCamSync = 0;
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      wifiStatus = false;
+      rtcBoot = false;
+      ntpStarted = false;
+      lastWsConnect = 0;  
+      shouldCloseClient = true;
+      break;
+    default:
+      break;
+  }
+}
+
 void startWifi() {
-  WiFi.mode(WIFI_STA);  // 🌟 บังคับให้อยู่ใน Station mode ก่อน autoConnect
+  WiFiManagerParameter custom_token_param("token", "Device Token (For Web)", myToken, 30);
+  wm.addParameter(&custom_token_param);
 
   wm.setAPCallback(configModeCallback);
-  wm.setConfigPortalTimeout(120);
-  bool connected = wm.autoConnect("Smart Pet Feeder");
+  wm.setSaveConfigCallback(saveConfigCallback);
+  wm.setConfigPortalTimeout(120);  
+  wm.setCleanConnect(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
 
-  if (connected) {
-    Serial.println("WiFi Connected");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
+  WiFi.begin();
+  unsigned long connectStart = millis();
+  while (millis() - connectStart < 2000 && WiFi.status() != WL_CONNECTED) {
+    delay(100);
+  }
 
-    // 🌟 [จุดสำคัญ!] ปิด WebSocket เก่าก่อนหมดสิ้นอย่างชัดแจ้ง
-    client.close();
-    delay(500);
-
-    wifiStatus = hasInternet();
+  if (WiFi.status() == WL_CONNECTED) {
+    forceCheckInternet = true;
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     ntpStarted = true;
-
-    // 🌟 บังคับให้อ่าน Tank ใหม่ทันทีแทนการรอ 30 วิ
-    forceUpdateTank = true;
-
+    forceUpdateTank = true; // 🌟 ให้อ่านถังอาหารทันที
     sendWifiToCam();
   } else {
-    Serial.println("WiFi Connect Failed");
-    ESP.restart();
+    configModeShown = false; 
+    wm.startConfigPortal("Smart Pet Feeder");
+
+    if (WiFi.status() == WL_CONNECTED) {
+      strcpy(myToken, custom_token_param.getValue()); 
+      
+      if (needRebootAfterWiFi) {
+        tft.fillScreen(TFT_BLACK);
+        tft.setTextColor(TFT_GREEN);
+        tft.setTextSize(2);
+        tft.setCursor(40, 100);
+        tft.println("WiFi Saved!");
+        tft.setCursor(40, 130);
+        tft.println("Rebooting...");
+        bootStatusFlag = 2; 
+        delay(1500);
+        ESP.restart(); 
+      }
+      forceCheckInternet = true;
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+      ntpStarted = true;
+      forceUpdateTank = true; // 🌟 ให้อ่านถังอาหารทันที
+      sendWifiToCam();
+    } else {
+      wifiStatus = false;
+    }
   }
 }
 
@@ -488,9 +489,7 @@ void checkInternetConnection(unsigned long currentTime) {
     if (currentTime - startDelayNetCheck >= END_DELAY_NET_CHECK) {
       startDelayNetCheck = currentTime;
       wifiStatus = hasInternet();
-      if (wifiStatus && checkRtc && !rtcBoot) {
-        syncRtcFromNtp();
-      }
+      if (wifiStatus && checkRtc && !rtcBoot) syncRtcFromNtp();
     }
   } else {
     wifiStatus = false;
@@ -498,7 +497,14 @@ void checkInternetConnection(unsigned long currentTime) {
     ntpStarted = false;
     if (currentTime - startDelayWifiRetry >= END_DELAY_WIFI_RETRY) {
       startDelayWifiRetry = currentTime;
-      if (WiFi.status() == WL_IDLE_STATUS || WiFi.status() == WL_DISCONNECTED) {
+      uint8_t wifiState = WiFi.status();
+      if (wifiState == WL_IDLE_STATUS || wifiState == WL_DISCONNECTED || wifiState == WL_NO_SSID_AVAIL) {
+        WiFi.mode(WIFI_STA);
+        WiFi.setAutoReconnect(true);
+        WiFi.begin();  
+      } else if (wifiState == WL_CONNECT_FAILED) {
+        WiFi.disconnect(false);  
+        delay(500);
         WiFi.begin();
       }
     }
@@ -527,12 +533,14 @@ void checkStatusWifi() {
   }
 }
 
-void parseScheduleFromWebSocket(String raw) {
+bool parseScheduleFromWebSocket(String raw) {
+  FeedingTime parsedSchedules[3];
+  int validCount = 0;
   for (int i = 0; i < 3; i++) {
-    schedules[i].active = false;
-    schedules[i].hour = 0;
-    schedules[i].minute = 0;
-    schedules[i].gram = 10;
+    parsedSchedules[i].active = false;
+    parsedSchedules[i].hour = 0;
+    parsedSchedules[i].minute = 0;
+    parsedSchedules[i].gram = 10;
   }
 
   int start = 0;
@@ -546,103 +554,84 @@ void parseScheduleFromWebSocket(String raw) {
     int secondColon = item.lastIndexOf(':');
 
     if (firstColon > 0 && secondColon > firstColon) {
-      schedules[slot].hour = item.substring(0, firstColon).toInt();
-      schedules[slot].minute = item.substring(firstColon + 1, secondColon).toInt();
-      schedules[slot].gram = item.substring(secondColon + 1).toInt();
-      schedules[slot].active = true;
+      int hour = item.substring(0, firstColon).toInt();
+      int minute = item.substring(firstColon + 1, secondColon).toInt();
+      int gram = item.substring(secondColon + 1).toInt();
+
+      if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 && gram > 0 && gram <= 500 && gram % 10 == 0) {
+        parsedSchedules[slot].hour = hour;
+        parsedSchedules[slot].minute = minute;
+        parsedSchedules[slot].gram = gram;
+        parsedSchedules[slot].active = true;
+        validCount++;
+      }
     }
     slot++;
     start = end + 1;
   }
+
+  if (validCount == 0) return false;
+  for (int i = 0; i < 3; i++) schedules[i] = parsedSchedules[i];
   saveSettings();
-  DEBUG_PRINTLN("✅ WebSocket: Schedules Updated");
+  return true;
 }
 
 void onMessageCallback(WebsocketsMessage message) {
   String data = message.data();
-  DEBUG_PRINTLN("📥 RAW WSc Data: " + data);
-
   if (data.startsWith("{")) {
-
     StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, data);
-
-    if (error) {
-      DEBUG_PRINT("❌ JSON Parse Failed: ");
-      DEBUG_PRINTLN(error.f_str());
-      return;
-    }
+    if (error) return;
 
     const char* type = doc["type"];
-
     if (!type) return;
 
     if (strcmp(type, "manual_feed") == 0) {
       int feedGram = doc["amount"];
-      if (feedGram > 0) {
-        DEBUG_PRINTF("🌐 Web requested manual feed: %dg\n", feedGram);
-        startFeeding(feedGram, ADD_MORE, millis());
-      } else {
-        DEBUG_PRINTLN("⚠️ Warning: manual_feed amount is 0 or invalid!");
-      }
+      if (feedGram > 0) startFeeding(feedGram, ADD_MORE, millis());
     } else if (strcmp(type, "schedule_update") == 0) {
       const char* rawSchedule = doc["raw"];
       if (rawSchedule) {
-        DEBUG_PRINTLN("📥 Received Schedule: " + String(rawSchedule));
-        parseScheduleFromWebSocket(String(rawSchedule));
-
-        if (WiFi.status() == WL_CONNECTED) {
+        bool scheduleSaved = parseScheduleFromWebSocket(String(rawSchedule));
+        if (scheduleSaved && WiFi.status() == WL_CONNECTED) {
           String ackJson = "{\"type\":\"ack\", \"token\":\"" + String(myToken) + "\", \"msg\":\"schedule_updated\"}";
           client.send(ackJson);
-          DEBUG_PRINTLN("📤 Sent ACK to Server: " + ackJson);
         }
       }
     }
-
-  } else {
-    DEBUG_PRINTLN("⚠️ Ignored Non-JSON Message");
   }
 }
 
 void handleWebSocket(unsigned long now) {
-  if (WiFi.status() != WL_CONNECTED) {
-    client.close();
-    return;
-  }
+  if (WiFi.status() == WL_CONNECTED) {
+    if (client.available()) client.poll();
 
-  static unsigned long lastWsConnect = 0;
-
-  // ถ้าไม่มีการเชื่อมต่อ ให้พยายาม reconnect ทุก 5 วิ
-  if (!client.available()) {
-    if (now - lastWsConnect > WEBSOCKET_RETRY_INTERVAL) {
-      lastWsConnect = now;
-
-      DEBUG_PRINTLN(">>> Reconnecting WebSocket (Force Close)...");
-
-      // 🌟 ปิด connection เก่าอย่างชัดแจ้ง ไม่ใช่แค่รอ
-      client.close();
-      delay(300);
-
-      bool connected = client.connect(websocket_server_host, server_port, "/");
-      if (connected) {
-        DEBUG_PRINTLN("✅ WebSocket Connected!");
-        client.send("{\"type\":\"register\", \"token\":\"" + String(myToken) + "\"}");
-        client.onMessage(onMessageCallback);
-      } else {
-        DEBUG_PRINTLN("❌ WebSocket Connect Failed");
+    if (!client.available()) {
+      if (now - lastWsConnect > WEBSOCKET_RETRY_INTERVAL) {
+        lastWsConnect = now;
+        client.close(); // 🌟 บังคับเคลียร์ state เดิมก่อนต่อใหม่
+        delay(300);
+        bool connected = client.connect(websocket_server_host, server_port, "/");
+        if (connected) {
+          client.send("{\"type\":\"register\", \"token\":\"" + String(myToken) + "\"}");
+          client.onMessage(onMessageCallback);
+        }
+      }
+    } else {
+      if (now - lastWebSocketSend > WEBSOCKET_SEND_INTERVAL) {
+        lastWebSocketSend = now;
+        String json = "{\"type\":\"update_sensor\", \"token\":\"" + String(myToken) + "\", \"food\":" + String(tankFood) + ", \"water\":" + String(tankWater) + ", \"bowlFood\":" + String(bowlFood) + ", \"bowlWater\":" + String(bowlWater) + "}";
+        client.send(json);
       }
     }
-    return;  // ออกจากฟังก์ชัน ถ้ายังไม่เชื่อมต่อ
-  }
-
-  // ถ้าเชื่อมต่ออยู่ ให้ poll ข้อมูล
-  client.poll();
-
-  // ส่งข้อมูล sensor ตามตั้งเวลา
-  if (now - lastWebSocketSend > WEBSOCKET_SEND_INTERVAL) {
-    lastWebSocketSend = now;
-    String json = "{\"type\":\"update_sensor\", \"token\":\"" + String(myToken) + "\", \"food\":" + String(tankFood) + ", \"water\":" + String(tankWater) + ", \"bowlFood\":" + String(bowlFood) + ", \"bowlWater\":" + String(bowlWater) + "}";
-    client.send(json);
+  } else {
+    static unsigned long lastWsCloseTime = 0;
+    if (client.available()) {
+      if (now - lastWsCloseTime > 1000) { 
+        client.close();
+        lastWsCloseTime = now;
+      }
+    }
   }
 }
 
@@ -651,79 +640,63 @@ void sendWifiToCam() {
     String ssid = wm.getWiFiSSID(true);
     String pass = wm.getWiFiPass(true);
     String dataPacket = ssid + "," + pass + "\n";
+    delay(1000); // 🌟 ดีเลย์รอให้ชัวร์ก่อนส่งหากล้อง
     CamSerial.print(dataPacket);
-    DEBUG_PRINTLN("📤 Sent WiFi to CAM: " + dataPacket);
   }
 }
 
 void handleCameraSync(unsigned long now) {
-  if (now - lastCamSync >= CAM_SYNC_INTERVAL) {
+  unsigned long syncInterval = (camSyncBurstLeft > 0) ? 5000 : CAM_SYNC_INTERVAL;
+  if (now - lastCamSync >= syncInterval) {
     lastCamSync = now;
     sendWifiToCam();
+    if (camSyncBurstLeft > 0) camSyncBurstLeft--;
   }
 }
 
-// ============================================================================
-// ======================= 🧠 หมวดที่ 10: CORE LOGIC & PROCESS ==================
-// ============================================================================
-
 void checkESP32_RAM(unsigned long now) {
   static unsigned long lastRamCheck = 0;
-
   if (now - lastRamCheck > 10000) {
     lastRamCheck = now;
-
     uint32_t freeRam = ESP.getFreeHeap();
     uint32_t totalRam = ESP.getHeapSize();
     uint8_t ramPercent = (freeRam * 100) / totalRam;
-
-    DEBUG_PRINTF("🧠 [SYSTEM] Free RAM: %d bytes (%d%% free) | Min Free Ever: %d bytes\n",
-                 freeRam, ramPercent, ESP.getMinFreeHeap());
+    DEBUG_PRINTF("🧠 [SYSTEM] Free RAM: %d bytes (%d%% free)\n", freeRam, ramPercent);
   }
 }
 
 void startFeeding(int value, FeedMode mode, unsigned long now) {
   if (maintenanceMode || tankFood <= 0) {
-    DEBUG_PRINTLN("!!! BLOCKED: Maintenance Mode ON or Food Tank is EMPTY !!!");
+    currentFeedAmount = 0;
+    currentFeedSource = "";
     return;
   }
-
+  if (LoadCell_BowlFood.update()) bowlFood = (int)LoadCell_BowlFood.getData();
   float currentWeight = bowlFood;
 
   if (feedState != IDLE) return;
-
   if (currentWeight >= limitBowlFood) {
-    DEBUG_PRINTLN("!!! Bowl is FULL. Cannot feed. !!!");
+    currentFeedAmount = 0;
+    currentFeedSource = "";
     return;
   }
 
   float calculatedTarget = 0;
-  if (mode == FILL_UP_TO) {
-    calculatedTarget = value;
-  } else {
-    calculatedTarget = currentWeight + value;
-  }
+  if (mode == FILL_UP_TO) calculatedTarget = value;
+  else calculatedTarget = currentWeight + value;
 
-  if (calculatedTarget > limitBowlFood) {
-    DEBUG_PRINTF("!!! Warning: Target %0.2fg exceeds capacity. Capping at %dg.\n", calculatedTarget, limitBowlFood);
-    feedTargetWeight = limitBowlFood;
-  } else {
-    feedTargetWeight = calculatedTarget;
-  }
+  if (calculatedTarget > limitBowlFood) feedTargetWeight = limitBowlFood;
+  else feedTargetWeight = calculatedTarget;
 
   if (currentWeight >= feedTargetWeight) {
-    DEBUG_PRINTLN(">>> Target already reached. Skipping.");
+    currentFeedAmount = 0;
+    currentFeedSource = "";
     return;
   }
 
-  DEBUG_PRINTF(">>> Feeding Started. Target: %0.2fg\n", feedTargetWeight);
-
   currentFeedAmount = value;
-  if (mode == FILL_UP_TO) {
-    currentFeedSource = "schedule";
-  } else {
-    currentFeedSource = "manual";
-  }
+  if (mode == FILL_UP_TO) currentFeedSource = "schedule";
+  else currentFeedSource = "manual";
 
   feedServo.attach(SERVO_PIN);
   feedServo.write(SPEED_FWD);
@@ -734,31 +707,31 @@ void startFeeding(int value, FeedMode mode, unsigned long now) {
 void processFeeder(unsigned long now) {
   if (feedState == IDLE) return;
 
-  LoadCell_BowlFood.update();
-  float currentWeight = LoadCell_BowlFood.getData();
-  bowlFood = (int)currentWeight;
-
+  if (LoadCell_BowlFood.update()) {
+    float currentW = LoadCell_BowlFood.getData();
+    bowlFood = (int)currentW;
+  }
+  float currentWeight = (float)bowlFood;
   static unsigned long targetReachedTime = 0;
-  unsigned long realNow = millis();
+  
+  // 🌟 เบรกล่วงหน้า 5 กรัม
+  float stopTriggerWeight = feedTargetWeight - 5.0;
 
   switch (feedState) {
     case FORWARD:
-      if (realNow - feedTimer > FEED_TIMEOUT_MS) {
-        DEBUG_PRINTLN("!!! Timeout !!!");
+      if (now - feedTimer > FEED_TIMEOUT_MS) {
         feedServo.write(SPEED_STOP);
-        stopTimer = realNow;
+        stopTimer = now;
         feedState = FINISH;
         targetReachedTime = 0;
         break;
       }
-
-      if (currentWeight >= feedTargetWeight) {
+      if (currentWeight >= stopTriggerWeight) {
         if (targetReachedTime == 0) {
-          targetReachedTime = realNow;
-        } else if (realNow - targetReachedTime > 1000) {  
-          DEBUG_PRINTLN(">>> Target Reached and Stable!");
+          targetReachedTime = now; 
+        } else if (now - targetReachedTime > 300) { 
           feedServo.write(SPEED_STOP);
-          stopTimer = realNow;
+          stopTimer = now;
           feedState = FINISH;
           targetReachedTime = 0;
         }
@@ -768,16 +741,13 @@ void processFeeder(unsigned long now) {
       break;
 
     case FINISH:
-      if (realNow - stopTimer > SERVO_STOP_DELAY) {
+      if (now - stopTimer > SERVO_STOP_DELAY) {
         feedServo.detach();
-        DEBUG_PRINTLN(">>> Feed Complete (Async)");
         forceUpdateTank = true;
         feedState = IDLE;
-
         if (WiFi.status() == WL_CONNECTED) {
           String logJson = "{\"type\":\"feed_log\", \"token\":\"" + String(myToken) + "\", \"amount\":" + String(currentFeedAmount) + ", \"source\":\"" + currentFeedSource + "\"}";
           client.send(logJson);
-          DEBUG_PRINTLN("📤 Sent Feed Log to Server: " + logJson);
         }
       }
       break;
@@ -789,72 +759,56 @@ void processWater(unsigned long now) {
     if (waterState != WATER_IDLE) {
       digitalWrite(PUMP_PIN, LOW);
       waterState = WATER_IDLE;
-      DEBUG_PRINTLN("!!! System LOCKED or Tank Empty -> Water System Reset & Disabled !!!");
+      waterWaitTimer = 0;
+      lastDrinkWeight = 0;
     }
     return;
   }
+  if (waterPumpFault && now - waterFaultTimer >= WATER_RETRY_COOLDOWN_MS) waterPumpFault = false;
 
   switch (waterState) {
     case WATER_IDLE:
+      if (waterPumpFault || !waterBowlSensorValid) break;
       if (bowlWater <= limitBowlWater - WATER_DETECT_GAP) {
-        DEBUG_PRINTLN(">>> Pet drank water.");
         waterState = WATER_WAITING;
         waterWaitTimer = now;
         lastDrinkWeight = bowlWater;
       }
       break;
-
     case WATER_WAITING:
-      if (LoadCell_BowlWater.getData() < -15.0) {
-        waterWaitTimer = now;
-        DEBUG_PRINTLN("!!! Water Bowl Missing! Pump Paused. !!!");
-      } else if (bowlWater < lastDrinkWeight - 5) {  
+      if (!waterBowlSensorValid) waterWaitTimer = now;
+      else if (LoadCell_BowlWater.update() && LoadCell_BowlWater.getData() < -15.0) waterWaitTimer = now;
+      else if (bowlWater < lastDrinkWeight - 5 && lastDrinkWeight >= 5) {
         waterWaitTimer = now;
         lastDrinkWeight = bowlWater;
-        DEBUG_PRINTLN(">>> Pet is still drinking. Timer reset.");
-      } else if (bowlWater >= limitBowlWater) {
-        waterState = WATER_IDLE;
-        DEBUG_PRINTLN(">>> Water is already full. Cancel countdown.");
-      } else if (now - waterWaitTimer >= WATER_REFILL_DELAY_MS) {
-        DEBUG_PRINTLN(">>> Starting Pump...");
+      } else if (bowlWater >= limitBowlWater) waterState = WATER_IDLE;
+      else if (now - waterWaitTimer >= WATER_REFILL_DELAY_MS) {
         digitalWrite(PUMP_PIN, HIGH);
         pumpTimer = now;
         waterState = WATER_PUMPING;
       }
       break;
-
     case WATER_PUMPING:
-      if (bowlWater >= (limitBowlWater - 40)) {
-        DEBUG_PRINTLN(">>> Water Refilled to Limit. Stop Pump.");
+      if (!waterBowlSensorValid) {
         digitalWrite(PUMP_PIN, LOW);
         waterState = WATER_IDLE;
-
-        tft.init();
-        tft.setRotation(1);
-        ts.begin();
-
-        switch (currentPage) {
-          case 0: drawHomePage(); break;
-          case 1: drawMenuPage(); break;
-          case 2:
-            if (confirmMode == 1) {
-              drawConfirmPage("Confirm Reset", "WiFi?", 1);
-            } else if (confirmMode == 2) {
-              drawConfirmPage("Confirm Delete", "Round: " + String(deleteIdx + 1), 2);
-            }
-            break;
-          case 3: drawSetTimeFeedPage(); break;
-          case 4: drawSetTime(); break;
-          case 5: drawCheckSetTime(); break;
-          case 6: drawSetLimitPage(); break;
-          case 7: drawSetUpPage(); break;
-          default: drawHomePage(); break;
-        }
-
+        waterWaitTimer = 0;
+        lastDrinkWeight = 0;
+        waterPumpFault = true;
+        waterFaultTimer = now;
+      } else if (bowlWater >= (limitBowlWater - 40)) {
+        digitalWrite(PUMP_PIN, LOW);
+        waterState = WATER_IDLE;
+        waterWaitTimer = 0;
+        lastDrinkWeight = 0;
+        waterPumpFault = false;
       } else if (now - pumpTimer > WATER_TIMEOUT_MS) {
-        DEBUG_PRINTLN("!!! Water Pump Timeout! Force Stop. !!!");
         digitalWrite(PUMP_PIN, LOW);
         waterState = WATER_IDLE;
+        waterWaitTimer = 0;
+        lastDrinkWeight = 0;
+        waterPumpFault = true;
+        waterFaultTimer = now;
       }
       break;
   }
@@ -862,529 +816,205 @@ void processWater(unsigned long now) {
 
 void processSchedule(unsigned long now) {
   static unsigned long lastCheckTime = 0;
-  if (now - lastCheckTime < DELAY_SCHEDUIE) return;
+  if (now - lastCheckTime < DELAY_SCHEDULE) return;
   lastCheckTime = now;
 
-  int currentHour = -1;
-  int currentMinute = -1;
-  int currentSecond = -1;
+  int currentHour = -1, currentMinute = -1, currentSecond = -1;
+  unsigned long currentScheduleKey = 0;
 
   if (wifiStatus) {
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
-      currentHour = timeinfo.tm_hour;
-      currentMinute = timeinfo.tm_min;
-      currentSecond = timeinfo.tm_sec;
+      currentHour = timeinfo.tm_hour; currentMinute = timeinfo.tm_min; currentSecond = timeinfo.tm_sec;
+      currentScheduleKey = ((unsigned long)(timeinfo.tm_mon + 1) << 21) | ((unsigned long)timeinfo.tm_mday << 16) | ((unsigned long)currentHour << 11) | ((unsigned long)currentMinute);
     }
   }
 
   if (currentHour == -1 && checkRtc) {
     DateTime dt = rtc.now();
     if (dt.isValid()) {
-      currentHour = dt.hour();
-      currentMinute = dt.minute();
-      currentSecond = dt.second();
+      currentHour = dt.hour(); currentMinute = dt.minute(); currentSecond = dt.second();
+      currentScheduleKey = ((unsigned long)dt.month() << 21) | ((unsigned long)dt.day() << 16) | ((unsigned long)currentHour << 11) | ((unsigned long)currentMinute);
     }
   }
 
   if (currentHour == -1) return;
 
   for (int i = 0; i < 3; i++) {
-    if (schedules[i].active) {
-      if (currentHour == schedules[i].hour && currentMinute == schedules[i].minute && currentSecond < 2) {
-        DEBUG_PRINTF(">>> Schedule #%d Triggered at %02d:%02d (%dg)\n", i + 1, currentHour, currentMinute, schedules[i].gram);
-        startFeeding(schedules[i].gram, FILL_UP_TO, now);
-      }
+    if (schedules[i].active && currentHour == schedules[i].hour && currentMinute == schedules[i].minute && currentSecond < 2) {
+      if (lastScheduleTriggerKey[i] == currentScheduleKey) continue;
+      lastScheduleTriggerKey[i] = currentScheduleKey;
+      startFeeding(schedules[i].gram, FILL_UP_TO, now);
     }
   }
 }
 
-
-// ============================================================================
-// ======================= 🎨 หมวดที่ 11: UI & DISPLAY GRAPHICS ===============
-// ============================================================================
 void drawHomePage() {
   currentPage = 0;
   tft.fillScreen(TFT_BLACK);
-
   tft.fillRect(0, 0, 320, 40, TFT_NAVY);
   tft.setTextColor(TFT_WHITE, TFT_NAVY);
   tft.setTextSize(2);
   tft.setCursor(10, 10);
   tft.print("Smart Pet Feeder");
-
   tft.drawRect(10, 50, 300, 30, TFT_WHITE);
-
-  tft.fillRect(15, 90, 140, 40, TFT_BABYBLUE);
-  tft.drawRect(15, 90, 140, 40, TFT_WHITE);
-  tft.setTextColor(TFT_BLACK, TFT_BABYBLUE);
-  tft.setCursor(31, 102);
-  tft.print("Food:");
-  tft.print(tankFood);
-  tft.print("%");
-
-  tft.fillRect(15, 140, 140, 40, TFT_BABYBLUE);
-  tft.drawRect(15, 140, 140, 40, TFT_WHITE);
-  tft.setTextColor(TFT_BLACK, TFT_BABYBLUE);
-  tft.setCursor(20, 152);
-  tft.print("Bowl:");
-  tft.print(bowlFood);
-  tft.print("g.");
-
-  tft.fillRect(15, 190, 140, 40, TFT_DARKGREEN);
-  tft.drawRect(15, 190, 140, 40, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREEN);
-  tft.setCursor(37, 202);
-  tft.print("FEEDFOOD");
-
-  tft.fillRect(165, 90, 140, 40, TFT_CREAMYELLOW);
-  tft.drawRect(165, 90, 140, 40, TFT_WHITE);
-  tft.setTextColor(TFT_BLACK, TFT_CREAMYELLOW);
-  tft.setCursor(175, 102);
-  tft.print("Water:");
-  tft.print(tankWater);
-  tft.print("%");
-
-  tft.fillRect(165, 140, 140, 40, TFT_CREAMYELLOW);
-  tft.drawRect(165, 140, 140, 40, TFT_WHITE);
-  tft.setTextColor(TFT_BLACK, TFT_CREAMYELLOW);
-  tft.setCursor(170, 152);
-  tft.print("Bowl:");
-  tft.print(bowlWater);
-  tft.print("mL");
-
-  tft.fillRect(165, 190, 140, 40, TFT_BLUE);
-  tft.drawRect(165, 190, 140, 40, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_BLUE);
-  tft.setCursor(211, 202);
-  tft.print("MENU");
-
-  lastTimeStr = "";
-  lastWifiStatus = !wifiStatus;
-  forceUpdateTank = true;
+  tft.fillRect(15, 90, 140, 40, TFT_BABYBLUE); tft.drawRect(15, 90, 140, 40, TFT_WHITE);
+  tft.setTextColor(TFT_BLACK, TFT_BABYBLUE); tft.setCursor(31, 102); tft.print("Food:"); tft.print(tankFood); tft.print("%");
+  tft.fillRect(15, 140, 140, 40, TFT_BABYBLUE); tft.drawRect(15, 140, 140, 40, TFT_WHITE);
+  tft.setTextColor(TFT_BLACK, TFT_BABYBLUE); tft.setCursor(20, 152); tft.print("Bowl:"); tft.print(bowlFood); tft.print("g.");
+  tft.fillRect(15, 190, 140, 40, TFT_DARKGREEN); tft.drawRect(15, 190, 140, 40, TFT_WHITE);
+  tft.setTextColor(TFT_WHITE, TFT_DARKGREEN); tft.setCursor(37, 202); tft.print("FEEDFOOD");
+  tft.fillRect(165, 90, 140, 40, TFT_CREAMYELLOW); tft.drawRect(165, 90, 140, 40, TFT_WHITE);
+  tft.setTextColor(TFT_BLACK, TFT_CREAMYELLOW); tft.setCursor(175, 102); tft.print("Water:"); tft.print(tankWater); tft.print("%");
+  tft.fillRect(165, 140, 140, 40, TFT_CREAMYELLOW); tft.drawRect(165, 140, 140, 40, TFT_WHITE);
+  tft.setTextColor(TFT_BLACK, TFT_CREAMYELLOW); tft.setCursor(170, 152); tft.print("Bowl:"); tft.print(bowlWater); tft.print("mL");
+  tft.fillRect(165, 190, 140, 40, TFT_BLUE); tft.drawRect(165, 190, 140, 40, TFT_WHITE);
+  tft.setTextColor(TFT_WHITE, TFT_BLUE); tft.setCursor(211, 202); tft.print("MENU");
+  lastTimeStr = ""; lastWifiStatus = !wifiStatus; forceUpdateTank = true;
 }
 
 void drawMenuPage() {
   currentPage = 1;
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextSize(2);
-
-  tft.fillRect(0, 0, 320, 40, TFT_DARKGREY);
-  tft.setTextColor(TFT_BLACK, TFT_DARKGREY);
-  tft.setCursor(10, 10);
-  tft.print("Menu");
-
-  tft.fillRect(10, 50, 300, 40, TFT_RED);
-  tft.drawRect(10, 50, 300, 40, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_RED);
-  tft.setCursor(100, 62);
-  tft.print("RESET WiFi");
-
-  tft.fillRect(10, 100, 140, 40, TFT_BLACK);
-  tft.drawRect(10, 100, 140, 40, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(32, 112);
-  tft.print("Set Time");
-
-  tft.fillRect(10, 150, 140, 40, TFT_BLACK);
-  tft.drawRect(10, 150, 140, 40, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(20, 162);
-  tft.print("Check Time");
-
-  tft.fillRect(170, 100, 140, 40, TFT_BLACK);
-  tft.drawRect(170, 100, 140, 40, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(186, 112);
-  tft.print("Set Limit");
-
-  tft.fillRect(170, 150, 140, 40, TFT_BLACK);
-  tft.drawRect(170, 150, 140, 40, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(204, 162);
-  tft.print("Set Up");
-
+  tft.fillScreen(TFT_BLACK); tft.setTextSize(2);
+  tft.fillRect(0, 0, 320, 40, TFT_DARKGREY); tft.setTextColor(TFT_BLACK, TFT_DARKGREY); tft.setCursor(10, 10); tft.print("Menu");
+  tft.fillRect(10, 50, 300, 40, TFT_RED); tft.drawRect(10, 50, 300, 40, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_RED); tft.setCursor(100, 62); tft.print("RESET WiFi");
+  tft.fillRect(10, 100, 140, 40, TFT_BLACK); tft.drawRect(10, 100, 140, 40, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setCursor(32, 112); tft.print("Set Time");
+  tft.fillRect(10, 150, 140, 40, TFT_BLACK); tft.drawRect(10, 150, 140, 40, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setCursor(20, 162); tft.print("Check Time");
+  tft.fillRect(170, 100, 140, 40, TFT_BLACK); tft.drawRect(170, 100, 140, 40, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setCursor(186, 112); tft.print("Set Limit");
+  tft.fillRect(170, 150, 140, 40, TFT_BLACK); tft.drawRect(170, 150, 140, 40, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setCursor(204, 162); tft.print("Set Up");
   backButton();
 }
 
 void drawConfirmPage(String title, String subTitle, int num) {
-  currentPage = 2;
-  tft.fillScreen(TFT_BLACK);
-  tft.drawRect(40, 40, 240, 160, TFT_WHITE);
-  if (num == 1) {
-    tft.setTextColor(TFT_RED);
-    tft.setTextSize(3);
-    tft.setCursor(43, 70);
-    tft.print(title);
-
-    tft.setTextColor(TFT_WHITE);
-    tft.setTextSize(2);
-    tft.setCursor(130, 100);
-    tft.print(subTitle);
-  } else {
-    tft.setTextColor(TFT_RED);
-    tft.setTextSize(2);
-    tft.setCursor(76, 70);
-    tft.print(title);
-
-    tft.setTextColor(TFT_WHITE);
-    tft.setCursor(110, 100);
-    tft.print(subTitle);
-  }
-
-  tft.fillRect(55, 130, 100, 50, TFT_RED);
-  tft.drawRect(55, 130, 100, 50, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_RED);
-  tft.setCursor(87, 147);
-  tft.print("YES");
-
-  tft.fillRect(165, 130, 100, 50, TFT_NAVY);
-  tft.drawRect(165, 130, 100, 50, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_NAVY);
-  tft.setCursor(203, 147);
-  tft.print("NO");
+  currentPage = 2; tft.fillScreen(TFT_BLACK); tft.drawRect(40, 40, 240, 160, TFT_WHITE);
+  if (num == 1) { tft.setTextColor(TFT_RED); tft.setTextSize(3); tft.setCursor(43, 70); tft.print(title); tft.setTextColor(TFT_WHITE); tft.setTextSize(2); tft.setCursor(130, 100); tft.print(subTitle); } 
+  else { tft.setTextColor(TFT_RED); tft.setTextSize(2); tft.setCursor(76, 70); tft.print(title); tft.setTextColor(TFT_WHITE); tft.setCursor(110, 100); tft.print(subTitle); }
+  tft.fillRect(55, 130, 100, 50, TFT_RED); tft.drawRect(55, 130, 100, 50, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_RED); tft.setCursor(87, 147); tft.print("YES");
+  tft.fillRect(165, 130, 100, 50, TFT_NAVY); tft.drawRect(165, 130, 100, 50, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_NAVY); tft.setCursor(203, 147); tft.print("NO");
 }
 
 void drawSetTimeFeedPage() {
-  currentPage = 3;
-  tempFeedAmount = 10;
-  tft.fillScreen(TFT_BLACK);
-
-  tft.fillRect(60, 20, 200, 50, TFT_BLACK);
-  tft.drawRect(60, 20, 200, 50, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(3);
-  tft.setCursor(154, 37);
-  tft.print("+");
-
-  tft.fillRect(60, 180, 200, 50, TFT_BLACK);
-  tft.drawRect(60, 180, 200, 50, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(154, 197);
-  tft.print("-");
-
-  tft.drawRect(60, 80, 200, 90, TFT_WHITE);
-
-  tft.setTextSize(2);
-  tft.setCursor(112, 90);
-  tft.print("FEEDFOOD");
-
+  currentPage = 3; tempFeedAmount = 10; tft.fillScreen(TFT_BLACK);
+  tft.fillRect(60, 20, 200, 50, TFT_BLACK); tft.drawRect(60, 20, 200, 50, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setTextSize(3); tft.setCursor(154, 37); tft.print("+");
+  tft.fillRect(60, 180, 200, 50, TFT_BLACK); tft.drawRect(60, 180, 200, 50, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setCursor(154, 197); tft.print("-");
+  tft.drawRect(60, 80, 200, 90, TFT_WHITE); tft.setTextSize(2); tft.setCursor(112, 90); tft.print("FEEDFOOD");
   updateTimerFeedValue(tempFeedAmount);
-
-  tft.fillRect(70, 135, 80, 30, TFT_DARKGREEN);
-  tft.drawRect(70, 135, 80, 30, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREEN);
-  tft.setTextSize(2);
-  tft.setCursor(92, 142);
-  tft.print("YES");
-
-  tft.fillRect(170, 135, 80, 30, TFT_RED);
-  tft.drawRect(170, 135, 80, 30, TFT_WHITE);
-  tft.setCursor(198, 142);
-  tft.setTextColor(TFT_WHITE, TFT_RED);
-  tft.print("NO");
+  tft.fillRect(70, 135, 80, 30, TFT_DARKGREEN); tft.drawRect(70, 135, 80, 30, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_DARKGREEN); tft.setTextSize(2); tft.setCursor(92, 142); tft.print("YES");
+  tft.fillRect(170, 135, 80, 30, TFT_RED); tft.drawRect(170, 135, 80, 30, TFT_WHITE); tft.setCursor(198, 142); tft.setTextColor(TFT_WHITE, TFT_RED); tft.print("NO");
 }
 
 void updateSetTimeValues() {
-  tft.setTextSize(2);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setTextSize(2); tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   int vals[] = { schedules[editIdx].hour, schedules[editIdx].minute, editIdx + 1, schedules[editIdx].gram };
   const char* labels[] = { "Hour", "Min", "Round", "Gram" };
-
   for (int i = 0; i < 4; i++) {
     int x = 10 + (i * 78);
     tft.fillRect(x + 1, 91, 66, 58, TFT_BLACK);
-    if (i == 1) tft.setCursor(x + 16, 100);
-    else if (i == 2) tft.setCursor(x + 4, 100);
-    else tft.setCursor(x + 10, 100);
-
+    if (i == 1) tft.setCursor(x + 16, 100); else if (i == 2) tft.setCursor(x + 4, 100); else tft.setCursor(x + 10, 100);
     tft.print(labels[i]);
-
     if (i == 3) {
-      if (vals[i] < 100) {
-        tft.setCursor(x + 16, 120);
-      } else {
-        tft.setCursor(x + 6, 120);
-      }
-      tft.print(vals[i]);
-      tft.print("g.");
-    } else if (i == 2) {
-      tft.setCursor(x + 27, 120);
-      tft.print(vals[i]);
-    } else {
-      tft.setCursor(x + 22, 120);
-      tft.printf("%02d", vals[i]);
-    }
+      if (vals[i] < 100) tft.setCursor(x + 16, 120); else tft.setCursor(x + 6, 120);
+      tft.print(vals[i]); tft.print("g.");
+    } else if (i == 2) { tft.setCursor(x + 27, 120); tft.print(vals[i]); } 
+      else { tft.setCursor(x + 22, 120); tft.printf("%02d", vals[i]); }
   }
 }
 
 void drawSetTime() {
-  currentPage = 4;
-  tft.fillScreen(TFT_BLACK);
-
-  tft.fillRect(0, 0, 320, 40, TFT_DARKGREY);
-  tft.setTextColor(TFT_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(10, 10);
-  tft.print("Set Time");
-  tft.setTextColor(TFT_WHITE);
-
+  currentPage = 4; tft.fillScreen(TFT_BLACK);
+  tft.fillRect(0, 0, 320, 40, TFT_DARKGREY); tft.setTextColor(TFT_BLACK); tft.setTextSize(2); tft.setCursor(10, 10); tft.print("Set Time"); tft.setTextColor(TFT_WHITE);
   for (int i = 0; i < 4; i++) {
     int x = 10 + (i * 78);
-    tft.drawRect(x, 50, 68, 30, TFT_WHITE);
-    tft.setCursor(x + 28, 57);
-    tft.print("+");
-
+    tft.drawRect(x, 50, 68, 30, TFT_WHITE); tft.setCursor(x + 28, 57); tft.print("+");
     tft.drawRect(x, 90, 68, 60, TFT_WHITE);
-
-    tft.drawRect(x, 160, 68, 30, TFT_WHITE);
-    tft.setCursor(x + 28, 167);
-    tft.print("-");
+    tft.drawRect(x, 160, 68, 30, TFT_WHITE); tft.setCursor(x + 28, 167); tft.print("-");
   }
-
-  tft.fillRect(0, 200, 160, 40, TFT_DARKGREEN);
-  tft.drawRect(0, 200, 160, 40, TFT_WHITE);
-  tft.setCursor(62, 212);
-  tft.print("YES");
-
-  tft.fillRect(160, 200, 160, 40, TFT_RED);
-  tft.drawRect(160, 200, 160, 40, TFT_WHITE);
-  tft.setCursor(228, 212);
-  tft.print("NO");
-
+  tft.fillRect(0, 200, 160, 40, TFT_DARKGREEN); tft.drawRect(0, 200, 160, 40, TFT_WHITE); tft.setCursor(62, 212); tft.print("YES");
+  tft.fillRect(160, 200, 160, 40, TFT_RED); tft.drawRect(160, 200, 160, 40, TFT_WHITE); tft.setCursor(228, 212); tft.print("NO");
   updateSetTimeValues();
 }
 
 void drawCheckSetTime() {
-  currentPage = 5;
-  tft.fillScreen(TFT_BLACK);
-
-  tft.fillRect(0, 0, 320, 40, TFT_NAVY);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(10, 10);
-  tft.print("Feeding Schedule");
-
-  const char* top[] = { "R", "Time", "Gram", "Status" };
-  tft.setTextColor(TFT_YELLOW);
+  currentPage = 5; tft.fillScreen(TFT_BLACK);
+  tft.fillRect(0, 0, 320, 40, TFT_NAVY); tft.setTextColor(TFT_WHITE); tft.setTextSize(2); tft.setCursor(10, 10); tft.print("Feeding Schedule");
+  const char* top[] = { "R", "Time", "Gram", "Status" }; tft.setTextColor(TFT_YELLOW);
   for (int i = 0; i < 4; i++) {
     int x = 10 + (i * 39);
-    if (i == 2) tft.setCursor(x + 48, 55);
-    else if (i == 3) tft.setCursor(x + 84, 55);
-    else tft.setCursor(x, 55);
+    if (i == 2) tft.setCursor(x + 48, 55); else if (i == 3) tft.setCursor(x + 84, 55); else tft.setCursor(x, 55);
     tft.print(top[i]);
   }
-
   tft.drawLine(10, 75, 310, 75, TFT_WHITE);
-
   for (int i = 0; i < 3; i++) {
-    int yPos = 90 + (i * 40);
-    int y = 80 + (i * 40);
-    int yDEL = 87 + (i * 40);
-
-    tft.setTextColor(TFT_WHITE);
-    tft.setTextSize(2);
-
-    tft.setCursor(10, yPos);
-    tft.print(i + 1);
-
-    tft.setCursor(49, yPos);
-    tft.printf("%02d:%02d", schedules[i].hour, schedules[i].minute);
-
-    if (schedules[i].gram < 100) {
-      tft.setCursor(142, yPos);
-    } else {
-      tft.setCursor(132, yPos);
-    }
-    tft.print(schedules[i].gram);
-    tft.print("g.");
-
-    if (schedules[i].active) {
-      tft.setTextColor(TFT_GREEN);
-      tft.setCursor(211, yPos);
-      tft.print("ON");
-    } else {
-      tft.setTextColor(TFT_RED);
-      tft.setCursor(211, yPos);
-      tft.print("OFF");
-    }
-    tft.fillRect(270, y, 40, 30, TFT_RED);
-    tft.drawRect(270, y, 40, 30, TFT_WHITE);
-    tft.setTextColor(TFT_WHITE, TFT_RED);
-    tft.setCursor(272, yDEL);
-    tft.print("DEL");
-
+    int yPos = 90 + (i * 40); int y = 80 + (i * 40); int yDEL = 87 + (i * 40);
+    tft.setTextColor(TFT_WHITE); tft.setTextSize(2); tft.setCursor(10, yPos); tft.print(i + 1);
+    tft.setCursor(49, yPos); tft.printf("%02d:%02d", schedules[i].hour, schedules[i].minute);
+    if (schedules[i].gram < 100) tft.setCursor(142, yPos); else tft.setCursor(132, yPos);
+    tft.print(schedules[i].gram); tft.print("g.");
+    if (schedules[i].active) { tft.setTextColor(TFT_GREEN); tft.setCursor(211, yPos); tft.print("ON"); } 
+    else { tft.setTextColor(TFT_RED); tft.setCursor(211, yPos); tft.print("OFF"); }
+    tft.fillRect(270, y, 40, 30, TFT_RED); tft.drawRect(270, y, 40, 30, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_RED); tft.setCursor(272, yDEL); tft.print("DEL");
     tft.drawLine(10, yPos + 25, 310, yPos + 25, TFT_DARKGREY);
   }
-
   backButton();
 }
 
 void drawSetLimitPage() {
-  currentPage = 6;
-  tft.fillScreen(TFT_BLACK);
-
-  tft.fillRect(0, 0, 320, 40, TFT_NAVY);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(10, 10);
-  tft.print("Set Bowl Limit");
-
-  tft.setTextColor(TFT_CYAN);
-  tft.setCursor(30, 50);
-  tft.print("FOOD (g)");
-
-  tft.drawRect(30, 76, 100, 40, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE);
-  tft.setCursor(74, 88);
-  tft.print("+");
-
-  if (limitBowlFood >= 1000) {
-    tft.setCursor(56, 125);
-    tft.print(limitBowlFood);
-  } else if (limitBowlFood >= 100) {
-    tft.setCursor(62, 125);
-    tft.print(limitBowlFood);
-  } else {
-    tft.setCursor(68, 125);
-    tft.print(limitBowlFood);
-  }
-
-  tft.drawRect(30, 150, 100, 40, TFT_WHITE);
-  tft.setCursor(74, 162);
-  tft.print("-");
-
-  tft.setTextColor(TFT_YELLOW);
-  tft.setCursor(190, 50);
-  tft.print("WATER (ml)");
-
-  tft.drawRect(190, 76, 100, 40, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE);
-  tft.setCursor(234, 88);
-  tft.print("+");
-
-  if (limitBowlWater >= 1000) {
-    tft.setCursor(216, 125);
-    tft.print(limitBowlWater);
-  } else if (limitBowlWater >= 100) {
-    tft.setCursor(222, 125);
-    tft.print(limitBowlWater);
-  } else {
-    tft.setCursor(228, 125);
-    tft.print(limitBowlWater);
-  }
-
-  tft.drawRect(190, 150, 100, 40, TFT_WHITE);
-  tft.setCursor(234, 162);
-  tft.print("-");
-
+  currentPage = 6; tft.fillScreen(TFT_BLACK);
+  tft.fillRect(0, 0, 320, 40, TFT_NAVY); tft.setTextColor(TFT_WHITE); tft.setTextSize(2); tft.setCursor(10, 10); tft.print("Set Bowl Limit");
+  tft.setTextColor(TFT_CYAN); tft.setCursor(30, 50); tft.print("FOOD (g)");
+  tft.drawRect(30, 76, 100, 40, TFT_WHITE); tft.setTextColor(TFT_WHITE); tft.setCursor(74, 88); tft.print("+");
+  if (limitBowlFood >= 1000) tft.setCursor(56, 125); else if (limitBowlFood >= 100) tft.setCursor(62, 125); else tft.setCursor(68, 125);
+  tft.print(limitBowlFood);
+  tft.drawRect(30, 150, 100, 40, TFT_WHITE); tft.setCursor(74, 162); tft.print("-");
+  tft.setTextColor(TFT_YELLOW); tft.setCursor(190, 50); tft.print("WATER (ml)");
+  tft.drawRect(190, 76, 100, 40, TFT_WHITE); tft.setTextColor(TFT_WHITE); tft.setCursor(234, 88); tft.print("+");
+  if (limitBowlWater >= 1000) tft.setCursor(216, 125); else if (limitBowlWater >= 100) tft.setCursor(222, 125); else tft.setCursor(228, 125);
+  tft.print(limitBowlWater);
+  tft.drawRect(190, 150, 100, 40, TFT_WHITE); tft.setCursor(234, 162); tft.print("-");
   backButton();
 }
 
 void drawSetUpPage() {
-  currentPage = 7;
-  tft.fillScreen(TFT_BLACK);
-
-  tft.fillRect(0, 0, 320, 40, TFT_DARKGREY);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(10, 10);
-  tft.print("Maintenance Mode");
-
+  currentPage = 7; tft.fillScreen(TFT_BLACK);
+  tft.fillRect(0, 0, 320, 40, TFT_DARKGREY); tft.setTextColor(TFT_WHITE); tft.setTextSize(2); tft.setCursor(10, 10); tft.print("Maintenance Mode");
   if (maintenanceMode) {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.setTextSize(2);
-    tft.setCursor(70, 99);
-    tft.print("(Safe to Clean)");
-
-    tft.setTextSize(3);
-    tft.setCursor(43, 50);
-    tft.print("SYSTEM LOCKED");
-
-    tft.fillRect(60, 140, 200, 50, TFT_GREEN);
-    tft.setTextColor(TFT_BLACK);
-    tft.setCursor(106, 153);
-    tft.print("UNLOCK");
+    tft.setTextColor(TFT_RED, TFT_BLACK); tft.setTextSize(2); tft.setCursor(70, 99); tft.print("(Safe to Clean)");
+    tft.setTextSize(3); tft.setCursor(43, 50); tft.print("SYSTEM LOCKED");
+    tft.fillRect(60, 140, 200, 50, TFT_GREEN); tft.setTextColor(TFT_BLACK); tft.setCursor(106, 153); tft.print("UNLOCK");
   } else {
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.setTextSize(2);
-    tft.setCursor(46, 99);
-    tft.print("(Not Safe to Clean)");
-
-    tft.setTextSize(3);
-    tft.setCursor(52, 50);
-    tft.print("SYSTEM READY");
-
-    tft.fillRect(60, 140, 200, 50, TFT_RED);
-    tft.setTextColor(TFT_WHITE);
-    tft.setCursor(124, 153);
-    tft.print("LOCK");
+    tft.setTextColor(TFT_GREEN, TFT_BLACK); tft.setTextSize(2); tft.setCursor(46, 99); tft.print("(Not Safe to Clean)");
+    tft.setTextSize(3); tft.setCursor(52, 50); tft.print("SYSTEM READY");
+    tft.fillRect(60, 140, 200, 50, TFT_RED); tft.setTextColor(TFT_WHITE); tft.setCursor(124, 153); tft.print("LOCK");
   }
-
   backButton();
 }
 
 void updateTimerFeedValue(int value) {
-  tft.fillRect(100, 110, 120, 25, TFT_BLACK);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(3);
-  if (value < 100) tft.setCursor(136, 110);
-  else tft.setCursor(124, 110);
-  tft.print(value);
-  tft.print("g.");
+  tft.fillRect(100, 110, 120, 25, TFT_BLACK); tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setTextSize(3);
+  if (value < 100) tft.setCursor(136, 110); else tft.setCursor(124, 110);
+  tft.print(value); tft.print("g.");
 }
 
 void updateLimitValues() {
-  tft.setTextSize(2);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-
+  tft.setTextSize(2); tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.fillRect(50, 125, 80, 20, TFT_BLACK);
-  if (limitBowlFood >= 1000) tft.setCursor(56, 125);
-  else if (limitBowlFood >= 100) tft.setCursor(62, 125);
-  else tft.setCursor(68, 125);
+  if (limitBowlFood >= 1000) tft.setCursor(56, 125); else if (limitBowlFood >= 100) tft.setCursor(62, 125); else tft.setCursor(68, 125);
   tft.print(limitBowlFood);
-
   tft.fillRect(210, 125, 80, 20, TFT_BLACK);
-  if (limitBowlWater >= 1000) tft.setCursor(216, 125);
-  else if (limitBowlWater >= 100) tft.setCursor(222, 125);
-  else tft.setCursor(228, 125);
+  if (limitBowlWater >= 1000) tft.setCursor(216, 125); else if (limitBowlWater >= 100) tft.setCursor(222, 125); else tft.setCursor(228, 125);
   tft.print(limitBowlWater);
 }
 
 void restoreLimitButton(int btnCode) {
-  tft.setTextColor(TFT_BLACK);
-  int x, y;
-  String sym;
-
-  if (btnCode == 60) {
-    x = 30;
-    y = 76;
-    sym = "+";
-  } else if (btnCode == 61) {
-    x = 30;
-    y = 150;
-    sym = "-";
-  } else if (btnCode == 62) {
-    x = 190;
-    y = 76;
-    sym = "+";
-  } else if (btnCode == 63) {
-    x = 190;
-    y = 150;
-    sym = "-";
-  } else return;
-
-  tft.fillRect(x, y, 100, 40, TFT_BLACK);
-  tft.drawRect(x, y, 100, 40, TFT_WHITE);
-
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(2);
-  if (sym == "+") tft.setCursor(x + 44, y + 12);
-  else tft.setCursor(x + 44, y + 12);
+  tft.setTextColor(TFT_BLACK); int x, y; String sym;
+  if (btnCode == 60) { x = 30; y = 76; sym = "+"; } else if (btnCode == 61) { x = 30; y = 150; sym = "-"; } 
+  else if (btnCode == 62) { x = 190; y = 76; sym = "+"; } else if (btnCode == 63) { x = 190; y = 150; sym = "-"; } else return;
+  tft.fillRect(x, y, 100, 40, TFT_BLACK); tft.drawRect(x, y, 100, 40, TFT_WHITE);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setTextSize(2);
+  if (sym == "+") tft.setCursor(x + 44, y + 12); else tft.setCursor(x + 44, y + 8);
   tft.print(sym);
 }
 
-// 💡 รีเฟรชเฉพาะบางจุดของจอ เพื่อไม่ให้ภาพรวมกระพริบ
 void updateHomeDynamic(unsigned long now) {
   if (currentPage != 0) return;
   if (now - startDelayScreen >= END_DELAY_SCREEN) {
@@ -1394,105 +1024,74 @@ void updateHomeDynamic(unsigned long now) {
     if (wifiStatus) {
       struct tm timeinfo;
       if (getLocalTime(&timeinfo)) {
-        sprintf(timeBuffer, "%02d:%02d:%02d",
-                timeinfo.tm_hour,
-                timeinfo.tm_min,
-                timeinfo.tm_sec);
+        sprintf(timeBuffer, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
         timeValid = true;
       }
     } else if (checkRtc) {
       DateTime dt = rtc.now();
       if (dt.isValid()) {
-        sprintf(timeBuffer, "%02d:%02d:%02d",
-                dt.hour(),
-                dt.minute(),
-                dt.second());
+        sprintf(timeBuffer, "%02d:%02d:%02d", dt.hour(), dt.minute(), dt.second());
         timeValid = true;
       }
     }
     if (!timeValid) sprintf(timeBuffer, "--:--:--");
     String currentTimeStr = String(timeBuffer);
     if (currentTimeStr != lastTimeStr) {
-      tft.setTextColor(TFT_CYAN, TFT_BLACK);
-      tft.setTextSize(2);
-      tft.setCursor(112, 57);
-      tft.print(currentTimeStr);
+      tft.setTextColor(TFT_CYAN, TFT_BLACK); tft.setTextSize(2); tft.setCursor(112, 57); tft.print(currentTimeStr);
       lastTimeStr = currentTimeStr;
     }
+  }
+
+  // 🌟 เพิ่มการเช็คสถานะ Server ให้แสดงบนจอ
+  static bool lastServerStatus = !serverStatus;
+  serverStatus = client.available(); 
+
+  if (serverStatus != lastServerStatus) {
+    tft.setTextSize(1);
+    if (serverStatus) {
+      tft.setTextColor(TFT_GREEN, TFT_NAVY); tft.setCursor(200, 25); tft.print("SERVER: ONLINE ");
+    } else {
+      tft.setTextColor(TFT_RED, TFT_NAVY); tft.setCursor(200, 25); tft.print("SERVER: OFFLINE");
+    }
+    lastServerStatus = serverStatus;
   }
 
   static int lastTankFood = -1;
   static int lastBowlFood = -1;
 
   if (tankFood != lastTankFood) {
-    tft.fillRect(90, 102, 60, 25, TFT_BABYBLUE);
-    tft.setTextColor(TFT_BLACK, TFT_BABYBLUE);
-    tft.setTextSize(2);
-    tft.setCursor(90, 102);
-    tft.print(tankFood);
-    tft.print("%");
-    lastTankFood = tankFood;
+    tft.fillRect(90, 102, 60, 25, TFT_BABYBLUE); tft.setTextColor(TFT_BLACK, TFT_BABYBLUE); tft.setTextSize(2); tft.setCursor(90, 102);
+    tft.print(tankFood); tft.print("%"); lastTankFood = tankFood;
   }
-
   if (bowlFood != lastBowlFood) {
-    tft.fillRect(80, 152, 70, 25, TFT_BABYBLUE);
-    tft.setTextColor(TFT_BLACK, TFT_BABYBLUE);
-    tft.setTextSize(2);
-    tft.setCursor(80, 152);
-    tft.print(bowlFood);
-    tft.print("g.");
-    lastBowlFood = bowlFood;
+    tft.fillRect(80, 152, 70, 25, TFT_BABYBLUE); tft.setTextColor(TFT_BLACK, TFT_BABYBLUE); tft.setTextSize(2); tft.setCursor(80, 152);
+    tft.print(bowlFood); tft.print("g."); lastBowlFood = bowlFood;
   }
 
   static int lastTankWater = -1;
   static int lastBowlWater = -1;
 
   if (tankWater != lastTankWater) {
-    tft.fillRect(245, 102, 55, 20, TFT_CREAMYELLOW);
-    tft.setTextColor(TFT_BLACK, TFT_CREAMYELLOW);
-    tft.setTextSize(2);
-    tft.setCursor(245, 102);
-    tft.print(tankWater);
-    tft.print("%");
-    lastTankWater = tankWater;
+    tft.fillRect(245, 102, 55, 20, TFT_CREAMYELLOW); tft.setTextColor(TFT_BLACK, TFT_CREAMYELLOW); tft.setTextSize(2); tft.setCursor(245, 102);
+    tft.print(tankWater); tft.print("%"); lastTankWater = tankWater;
   }
-
   if (bowlWater != lastBowlWater) {
-    tft.fillRect(230, 152, 65, 20, TFT_CREAMYELLOW);
-    tft.setTextColor(TFT_BLACK, TFT_CREAMYELLOW);
-    tft.setTextSize(2);
-    tft.setCursor(230, 152);
-    tft.print(bowlWater);
-    tft.print("mL");
-    lastBowlWater = bowlWater;
+    tft.fillRect(230, 152, 65, 20, TFT_CREAMYELLOW); tft.setTextColor(TFT_BLACK, TFT_CREAMYELLOW); tft.setTextSize(2); tft.setCursor(230, 152);
+    tft.print(bowlWater); tft.print("mL"); lastBowlWater = bowlWater;
   }
 }
 
 void backButton() {
-  tft.fillRect(0, 200, 320, 40, TFT_NAVY);
-  tft.setTextColor(TFT_WHITE, TFT_NAVY);
-  tft.setTextSize(2);
-  tft.setCursor(130, 210);
-  tft.print("< BACK");
+  tft.fillRect(0, 200, 320, 40, TFT_NAVY); tft.setTextColor(TFT_WHITE, TFT_NAVY); tft.setTextSize(2); tft.setCursor(130, 210); tft.print("< BACK");
 }
 
 void backButtonEffect() {
-  tft.fillRect(0, 200, 320, 40, TFT_WHITE);
-  tft.setTextColor(TFT_BLACK, TFT_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(130, 210);
-  tft.print("< BACK");
+  tft.fillRect(0, 200, 320, 40, TFT_WHITE); tft.setTextColor(TFT_BLACK, TFT_WHITE); tft.setTextSize(2); tft.setCursor(130, 210); tft.print("< BACK");
 }
 
 void drawButtonEffect(int x, int y, String symbol) {
-  tft.fillRect(x, y, 200, 50, TFT_BLACK);
-  tft.drawRect(x, y, 200, 50, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(3);
-
-  if (symbol == "+") tft.setCursor(x + 92, y + 13);
-  else tft.setCursor(x + 92, y + 13);
-
+  tft.fillRect(x, y, 200, 50, TFT_BLACK); tft.drawRect(x, y, 200, 50, TFT_WHITE); tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.setTextSize(3);
+  if (symbol == "+") tft.setCursor(x + 92, y + 13); else tft.setCursor(x + 92, y + 13);
   tft.print(symbol);
 }
 
@@ -1502,25 +1101,15 @@ void setTimeEffectButton(int action) {
     int yPos = (action < 44) ? 50 : 160;
     const char* sym = (action < 44) ? "+" : "-";
     int xPos = 10 + (i * 78);
-
-    tft.fillRect(xPos, yPos, 68, 30, TFT_BLACK);
-    tft.drawRect(xPos, yPos, 68, 30, TFT_WHITE);
-    tft.setTextColor(TFT_WHITE);
-    tft.setTextSize(2);
-    tft.setCursor(xPos + 28, yPos + 7);
-    tft.print(sym);
+    tft.fillRect(xPos, yPos, 68, 30, TFT_BLACK); tft.drawRect(xPos, yPos, 68, 30, TFT_WHITE);
+    tft.setTextColor(TFT_WHITE); tft.setTextSize(2); tft.setCursor(xPos + 28, yPos + 7); tft.print(sym);
   }
 }
 
-
-// ============================================================================
-// ======================= 🖱️ หมวดที่ 12: TOUCH HANDLING ========================
-// ============================================================================
 void checkTouch(unsigned long now) {
   if (actionButton != 0) return;
   if (ts.touched()) {
     TS_Point p = ts.getPoint();
-    // 💡 ปรับค่าการสัมผัสให้เข้ากับพิกัดจริงบนหน้าจอ
     int x = map(p.x, X_MAX, X_MIN, 0, tft.width());
     int y = map(p.y, Y_MAX, Y_MIN, 0, tft.height());
     x = constrain(x, 0, tft.width() - 1);
@@ -1528,110 +1117,52 @@ void checkTouch(unsigned long now) {
 
     if (currentPage == 0) {
       if (x > 15 && x < 155 && y > 190 && y < 230) {
-        tft.fillRect(15, 190, 140, 40, TFT_LIGHTGREEN);
-        tft.setTextColor(TFT_BLACK, TFT_LIGHTGREEN);
-        tft.setCursor(37, 202);
-        tft.print("FEEDFOOD");
-        actionButton = 1;
-        actionStartTime = now;
+        tft.fillRect(15, 190, 140, 40, TFT_LIGHTGREEN); tft.setTextColor(TFT_BLACK, TFT_LIGHTGREEN); tft.setCursor(37, 202); tft.print("FEEDFOOD");
+        actionButton = 1; actionStartTime = now;
       } else if (x > 165 && x < 305 && y > 190 && y < 230) {
-        tft.fillRect(165, 190, 140, 40, TFT_WHITE);
-        tft.setTextColor(TFT_BLACK, TFT_WHITE);
-        tft.setCursor(211, 202);
-        tft.print("MENU");
-        actionButton = 2;
-        actionStartTime = now;
+        tft.fillRect(165, 190, 140, 40, TFT_WHITE); tft.setTextColor(TFT_BLACK, TFT_WHITE); tft.setCursor(211, 202); tft.print("MENU");
+        actionButton = 2; actionStartTime = now;
       }
     } else if (currentPage == 1) {
       if (x > 10 && x < 310 && y > 50 && y < 90) {
-        tft.fillRect(10, 50, 300, 40, TFT_ORANGE);
-        tft.setTextColor(TFT_BLACK, TFT_ORANGE);
-        tft.setCursor(100, 62);
-        tft.print("RESET WiFi");
-        actionButton = 10;
-        actionStartTime = now;
+        tft.fillRect(10, 50, 300, 40, TFT_ORANGE); tft.setTextColor(TFT_BLACK, TFT_ORANGE); tft.setCursor(100, 62); tft.print("RESET WiFi");
+        actionButton = 10; actionStartTime = now;
       } else if (x > 10 && x < 150 && y > 100 && y < 140) {
-        tft.fillRect(10, 100, 140, 40, TFT_WHITE);
-        tft.setTextColor(TFT_BLACK, TFT_WHITE);
-        tft.setCursor(32, 112);
-        tft.print("Set Time");
-        actionButton = 11;
-        actionStartTime = now;
+        tft.fillRect(10, 100, 140, 40, TFT_WHITE); tft.setTextColor(TFT_BLACK, TFT_WHITE); tft.setCursor(32, 112); tft.print("Set Time");
+        actionButton = 11; actionStartTime = now;
       } else if (x > 10 && x < 150 && y > 150 && y < 190) {
-        tft.fillRect(10, 150, 140, 40, TFT_WHITE);
-        tft.setTextColor(TFT_BLACK, TFT_WHITE);
-        tft.setCursor(26, 162);
-        tft.print("Check Time");
-        actionButton = 12;
-        actionStartTime = now;
+        tft.fillRect(10, 150, 140, 40, TFT_WHITE); tft.setTextColor(TFT_BLACK, TFT_WHITE); tft.setCursor(26, 162); tft.print("Check Time");
+        actionButton = 12; actionStartTime = now;
       } else if (x > 170 && x < 310 && y > 100 && y < 140) {
-        tft.fillRect(170, 100, 140, 40, TFT_WHITE);
-        tft.setTextColor(TFT_BLACK, TFT_WHITE);
-        tft.setCursor(186, 112);
-        tft.print("Set Limit");
-        actionButton = 13;
-        actionStartTime = now;
+        tft.fillRect(170, 100, 140, 40, TFT_WHITE); tft.setTextColor(TFT_BLACK, TFT_WHITE); tft.setCursor(186, 112); tft.print("Set Limit");
+        actionButton = 13; actionStartTime = now;
       } else if (x > 170 && x < 310 && y > 150 && y < 190) {
-        tft.fillRect(170, 150, 140, 40, TFT_WHITE);
-        tft.setTextColor(TFT_BLACK, TFT_WHITE);
-        tft.setCursor(204, 162);
-        tft.print("Set Up");
-        actionButton = 14;
-        actionStartTime = now;
+        tft.fillRect(170, 150, 140, 40, TFT_WHITE); tft.setTextColor(TFT_BLACK, TFT_WHITE); tft.setCursor(204, 162); tft.print("Set Up");
+        actionButton = 14; actionStartTime = now;
       } else if (y > 200) {
-        backButtonEffect();
-        actionButton = 15;
-        actionStartTime = now;
+        backButtonEffect(); actionButton = 15; actionStartTime = now;
       }
     } else if (currentPage == 2) {
       if (x > 55 && x < 155 && y > 130 && y < 180) {
-        tft.fillRect(55, 130, 100, 50, TFT_ORANGE);
-        tft.setTextColor(TFT_BLACK, TFT_ORANGE);
-        tft.setCursor(87, 147);
-        tft.print("YES");
-        actionButton = 20;
-        actionStartTime = now;
+        tft.fillRect(55, 130, 100, 50, TFT_ORANGE); tft.setTextColor(TFT_BLACK, TFT_ORANGE); tft.setCursor(87, 147); tft.print("YES");
+        actionButton = 20; actionStartTime = now;
       } else if (x > 165 && x < 265 && y > 130 && y < 180) {
-        tft.fillRect(165, 130, 100, 50, TFT_WHITE);
-        tft.setTextColor(TFT_BLACK, TFT_WHITE);
-        tft.setCursor(203, 147);
-        tft.print("NO");
-        actionButton = 21;
-        actionStartTime = now;
+        tft.fillRect(165, 130, 100, 50, TFT_WHITE); tft.setTextColor(TFT_BLACK, TFT_WHITE); tft.setCursor(203, 147); tft.print("NO");
+        actionButton = 21; actionStartTime = now;
       }
     } else if (currentPage == 3) {
       if (x > 60 && x < 260 && y > 20 && y < 70) {
-        tft.fillRect(60, 20, 200, 50, TFT_WHITE);
-        tft.setTextColor(TFT_BLACK, TFT_WHITE);
-        tft.setTextSize(3);
-        tft.setCursor(152, 33);
-        tft.print("+");
-        actionButton = 30;
-        actionStartTime = now;
+        tft.fillRect(60, 20, 200, 50, TFT_WHITE); tft.setTextColor(TFT_BLACK, TFT_WHITE); tft.setTextSize(3); tft.setCursor(152, 33); tft.print("+");
+        actionButton = 30; actionStartTime = now;
       } else if (x > 60 && x < 260 && y > 180 && y < 230) {
-        tft.fillRect(60, 180, 200, 50, TFT_WHITE);
-        tft.setTextColor(TFT_BLACK, TFT_WHITE);
-        tft.setTextSize(3);
-        tft.setCursor(152, 193);
-        tft.print("-");
-        actionButton = 31;
-        actionStartTime = now;
+        tft.fillRect(60, 180, 200, 50, TFT_WHITE); tft.setTextColor(TFT_BLACK, TFT_WHITE); tft.setTextSize(3); tft.setCursor(152, 193); tft.print("-");
+        actionButton = 31; actionStartTime = now;
       } else if (x > 70 && x < 150 && y > 135 && y < 165) {
-        tft.fillRect(70, 135, 80, 30, TFT_LIGHTGREEN);
-        tft.setTextColor(TFT_BLACK, TFT_LIGHTGREEN);
-        tft.setTextSize(2);
-        tft.setCursor(92, 142);
-        tft.print("YES");
-        actionButton = 32;
-        actionStartTime = now;
+        tft.fillRect(70, 135, 80, 30, TFT_LIGHTGREEN); tft.setTextColor(TFT_BLACK, TFT_LIGHTGREEN); tft.setTextSize(2); tft.setCursor(92, 142); tft.print("YES");
+        actionButton = 32; actionStartTime = now;
       } else if (x > 170 && x < 250 && y > 135 && y < 165) {
-        tft.fillRect(170, 135, 80, 30, TFT_ORANGE);
-        tft.setTextColor(TFT_BLACK, TFT_ORANGE);
-        tft.setTextSize(2);
-        tft.setCursor(198, 142);
-        tft.print("NO");
-        actionButton = 33;
-        actionStartTime = now;
+        tft.fillRect(170, 135, 80, 30, TFT_ORANGE); tft.setTextColor(TFT_BLACK, TFT_ORANGE); tft.setTextSize(2); tft.setCursor(198, 142); tft.print("NO");
+        actionButton = 33; actionStartTime = now;
       }
     } else if (currentPage == 4) {
       if (y > 50 && y < 80) {
@@ -1639,12 +1170,8 @@ void checkTouch(unsigned long now) {
         if (i >= 0 && i <= 3) {
           int xPos = 10 + (i * 78);
           if (x >= xPos && x <= xPos + 68) {
-            tft.fillRect(xPos, 50, 68, 30, TFT_WHITE);
-            tft.setTextColor(TFT_BLACK);
-            tft.setCursor(xPos + 28, 57);
-            tft.print("+");
-            actionButton = 40 + i;
-            actionStartTime = now;
+            tft.fillRect(xPos, 50, 68, 30, TFT_WHITE); tft.setTextColor(TFT_BLACK); tft.setCursor(xPos + 28, 57); tft.print("+");
+            actionButton = 40 + i; actionStartTime = now;
           }
         }
       } else if (y > 160 && y < 190) {
@@ -1652,97 +1179,55 @@ void checkTouch(unsigned long now) {
         if (i >= 0 && i <= 3) {
           int xPos = 10 + (i * 78);
           if (x >= xPos && x <= xPos + 68) {
-            tft.fillRect(xPos, 160, 68, 30, TFT_WHITE);
-            tft.setTextColor(TFT_BLACK);
-            tft.setCursor(xPos + 28, 167);
-            tft.print("-");
-            actionButton = 44 + i;
-            actionStartTime = now;
+            tft.fillRect(xPos, 160, 68, 30, TFT_WHITE); tft.setTextColor(TFT_BLACK); tft.setCursor(xPos + 28, 167); tft.print("-");
+            actionButton = 44 + i; actionStartTime = now;
           }
         }
       } else if (y > 200) {
         if (x < 160) {
-          tft.fillRect(0, 200, 160, 40, TFT_LIGHTGREEN);
-          tft.setTextColor(TFT_BLACK, TFT_LIGHTGREEN);
-          tft.setCursor(62, 212);
-          tft.print("YES");
+          tft.fillRect(0, 200, 160, 40, TFT_LIGHTGREEN); tft.setTextColor(TFT_BLACK, TFT_LIGHTGREEN); tft.setCursor(62, 212); tft.print("YES");
           actionButton = 48;
         } else {
-          tft.fillRect(160, 200, 160, 40, TFT_ORANGE);
-          tft.setTextColor(TFT_BLACK, TFT_ORANGE);
-          tft.setCursor(228, 212);
-          tft.print("NO");
+          tft.fillRect(160, 200, 160, 40, TFT_ORANGE); tft.setTextColor(TFT_BLACK, TFT_ORANGE); tft.setCursor(228, 212); tft.print("NO");
           actionButton = 49;
         }
         actionStartTime = now;
       }
     } else if (currentPage == 5) {
       if (y > 200) {
-        backButtonEffect();
-        actionButton = 15;
-        actionStartTime = now;
+        backButtonEffect(); actionButton = 15; actionStartTime = now;
       } else if (x > 260 && y >= 80 && y < 200) {
         int row = (y - 80) / 40;
         if (row >= 0 && row <= 2) {
-          int yPos = 80 + (row * 40);
-          int yDEL = 87 + (row * 40);
+          int yPos = 80 + (row * 40); int yDEL = 87 + (row * 40);
           if (y >= yPos && y <= yPos + 30) {
-            tft.fillRect(270, yPos, 40, 30, TFT_ORANGE);
-            tft.setTextColor(TFT_BLACK, TFT_ORANGE);
-            tft.setCursor(272, yDEL);
-            tft.print("DEL");
-            actionButton = 50 + row;
-            actionStartTime = now;
+            tft.fillRect(270, yPos, 40, 30, TFT_ORANGE); tft.setTextColor(TFT_BLACK, TFT_ORANGE); tft.setCursor(272, yDEL); tft.print("DEL");
+            actionButton = 50 + row; actionStartTime = now;
           }
         }
       }
     } else if (currentPage == 6) {
       if (y > 200) {
-        backButtonEffect();
-        actionButton = 15;
-        actionStartTime = now;
+        backButtonEffect(); actionButton = 15; actionStartTime = now;
       } else if (x > 30 && x < 130 && y > 76 && y < 116) {
-        tft.fillRect(30, 76, 100, 40, TFT_WHITE);
-        tft.drawRect(30, 76, 100, 40, TFT_BLACK);
-        tft.setTextColor(TFT_BLACK);
-        tft.setCursor(74, 88);
-        tft.print("+");
-        actionButton = 60;
-        actionStartTime = now;
+        tft.fillRect(30, 76, 100, 40, TFT_WHITE); tft.drawRect(30, 76, 100, 40, TFT_BLACK); tft.setTextColor(TFT_BLACK); tft.setCursor(74, 88); tft.print("+");
+        actionButton = 60; actionStartTime = now;
       } else if (x > 30 && x < 130 && y > 150 && y < 190) {
-        tft.fillRect(30, 150, 100, 40, TFT_WHITE);
-        tft.drawRect(30, 150, 100, 40, TFT_BLACK);
-        tft.setTextColor(TFT_BLACK);
-        tft.setCursor(74, 162);
-        tft.print("-");
-        actionButton = 61;
-        actionStartTime = now;
+        tft.fillRect(30, 150, 100, 40, TFT_WHITE); tft.drawRect(30, 150, 100, 40, TFT_BLACK); tft.setTextColor(TFT_BLACK); tft.setCursor(74, 162); tft.print("-");
+        actionButton = 61; actionStartTime = now;
       } else if (x > 190 && x < 290 && y > 76 && y < 116) {
-        tft.fillRect(190, 76, 100, 40, TFT_WHITE);
-        tft.drawRect(190, 76, 100, 40, TFT_BLACK);
-        tft.setTextColor(TFT_BLACK);
-        tft.setCursor(234, 88);
-        tft.print("+");
-        actionButton = 62;
-        actionStartTime = now;
+        tft.fillRect(190, 76, 100, 40, TFT_WHITE); tft.drawRect(190, 76, 100, 40, TFT_BLACK); tft.setTextColor(TFT_BLACK); tft.setCursor(234, 88); tft.print("+");
+        actionButton = 62; actionStartTime = now;
       } else if (x > 190 && x < 290 && y > 150 && y < 190) {
-        tft.fillRect(190, 150, 100, 40, TFT_WHITE);
-        tft.drawRect(190, 150, 100, 40, TFT_BLACK);
-        tft.setTextColor(TFT_BLACK);
-        tft.setCursor(234, 162);
-        tft.print("-");
-        actionButton = 63;
-        actionStartTime = now;
+        tft.fillRect(190, 150, 100, 40, TFT_WHITE); tft.drawRect(190, 150, 100, 40, TFT_BLACK); tft.setTextColor(TFT_BLACK); tft.setCursor(234, 162); tft.print("-");
+        actionButton = 63; actionStartTime = now;
       }
     } else if (currentPage == 7) {
       if (y > 200) {
-        backButtonEffect();
-        actionButton = 15;
-        actionStartTime = now;
+        backButtonEffect(); actionButton = 15; actionStartTime = now;
       } else if (x > 60 && x < 260 && y > 140 && y < 190) {
         tft.fillRect(60, 140, 200, 50, TFT_WHITE);
-        actionButton = 70;
-        actionStartTime = now;
+        actionButton = 70; actionStartTime = now;
       }
     }
   }
@@ -1752,7 +1237,6 @@ void executePendingAction(unsigned long now) {
   if (actionButton == 0) return;
   unsigned long waitTime = resetDelay;
 
-  // 💡 ปุ่ม + และ - ลดดีเลย์ให้สั้นลง (200ms) เพื่อให้กดรัวๆ ได้
   if (actionButton == 30 || actionButton == 31 || (actionButton >= 40 && actionButton <= 47) || (actionButton >= 60 && actionButton <= 63)) {
     waitTime = PLUS_MINUS;
   }
@@ -1760,171 +1244,69 @@ void executePendingAction(unsigned long now) {
   if (now - actionStartTime >= waitTime) {
     int lastAction = actionButton;
     switch (actionButton) {
-      case 1:
-        drawSetTimeFeedPage();
-        break;
-      case 2:
-        drawMenuPage();
-        break;
-      case 10:
-        confirmMode = 1;
-        drawConfirmPage("Confirm Reset", "WiFi?", 1);
-        break;
-      case 11:
-        drawSetTime();
-        break;
-      case 12:
-        drawCheckSetTime();
-        break;
-      case 13:
-        drawSetLimitPage();
-        break;
-      case 14:
-        drawSetUpPage();
-        break;
+      case 1: drawSetTimeFeedPage(); break;
+      case 2: drawMenuPage(); break;
+      case 10: confirmMode = 1; drawConfirmPage("Confirm Reset", "WiFi?", 1); break;
+      case 11: drawSetTime(); break;
+      case 12: drawCheckSetTime(); break;
+      case 13: drawSetLimitPage(); break;
+      case 14: drawSetUpPage(); break;
       case 15:
-        if (currentPage == 5 || currentPage == 6 || currentPage == 7) {
-          saveSettings();
-          drawMenuPage();
-        } else {
-          drawHomePage();
-        }
+        if (currentPage == 5 || currentPage == 6 || currentPage == 7) { saveSettings(); drawMenuPage(); } 
+        else { drawHomePage(); }
         break;
       case 20:
-        if (confirmMode == 1) {
-          resetWiFi();
-        } else if (confirmMode == 2) {
+        if (confirmMode == 1) { resetWiFi(); } 
+        else if (confirmMode == 2) {
           if (WiFi.status() == WL_CONNECTED) {
-            char timeStr[6];
-            sprintf(timeStr, "%02d:%02d", schedules[deleteIdx].hour, schedules[deleteIdx].minute);
+            char timeStr[6]; sprintf(timeStr, "%02d:%02d", schedules[deleteIdx].hour, schedules[deleteIdx].minute);
             String json = "{\"type\":\"delete_schedule_from_esp\", \"token\":\"" + String(myToken) + "\", \"time\":\"" + String(timeStr) + "\"}";
             client.send(json);
-            DEBUG_PRINTLN("🗑️ Sent Delete Request to Server: " + json);
           }
-          schedules[deleteIdx].hour = 0;
-          schedules[deleteIdx].minute = 0;
-          schedules[deleteIdx].gram = 10;
-          schedules[deleteIdx].active = false;
-          saveSettings();
-          drawCheckSetTime();
+          schedules[deleteIdx].hour = 0; schedules[deleteIdx].minute = 0; schedules[deleteIdx].gram = 10; schedules[deleteIdx].active = false;
+          saveSettings(); drawCheckSetTime();
         }
         break;
       case 21:
-        if (confirmMode == 1) drawMenuPage();
-        else if (confirmMode == 2) drawCheckSetTime();
+        if (confirmMode == 1) drawMenuPage(); else if (confirmMode == 2) drawCheckSetTime();
         break;
-
       case 30:
-        if (tempFeedAmount < limitBowlFood) {
-          tempFeedAmount += 10;
-          updateTimerFeedValue(tempFeedAmount);
-        }
-        drawButtonEffect(60, 20, "+");
-        break;
+        if (tempFeedAmount < limitBowlFood) { tempFeedAmount += 10; updateTimerFeedValue(tempFeedAmount); }
+        drawButtonEffect(60, 20, "+"); break;
       case 31:
-        if (tempFeedAmount > 10) {
-          tempFeedAmount -= 10;
-          updateTimerFeedValue(tempFeedAmount);
-        }
-        drawButtonEffect(60, 180, "-");
-        break;
+        if (tempFeedAmount > 10) { tempFeedAmount -= 10; updateTimerFeedValue(tempFeedAmount); }
+        drawButtonEffect(60, 180, "-"); break;
       case 32:
-        manualFeedAmount = tempFeedAmount;
-        DEBUG_PRINTLN(manualFeedAmount);
-        startFeeding(manualFeedAmount, ADD_MORE, now);
-        drawHomePage();
-        break;
-      case 33:
-        drawHomePage();
-        break;
-
-      case 40:
-        schedules[editIdx].hour = (schedules[editIdx].hour + 1) % 24;
-        break;
-      case 41:
-        schedules[editIdx].minute = (schedules[editIdx].minute + 1) % 60;
-        break;
-      case 42:
-        editIdx = (editIdx + 1) % 3;
-        break;
-      case 43:
-        if (schedules[editIdx].gram <= 390) {
-          schedules[editIdx].gram += 10;
-        }
-        break;
-      case 44:
-        schedules[editIdx].hour = (schedules[editIdx].hour == 0) ? 23 : schedules[editIdx].hour - 1;
-        break;
-      case 45:
-        schedules[editIdx].minute = (schedules[editIdx].minute == 0) ? 59 : schedules[editIdx].minute - 1;
-        break;
-      case 46:
-        editIdx = (editIdx == 0) ? 2 : editIdx - 1;
-        break;
-      case 47:
-        if (schedules[editIdx].gram > 10) {
-          schedules[editIdx].gram -= 10;
-        }
-        break;
+        manualFeedAmount = tempFeedAmount; startFeeding(manualFeedAmount, ADD_MORE, now); drawHomePage(); break;
+      case 33: drawHomePage(); break;
+      case 40: schedules[editIdx].hour = (schedules[editIdx].hour + 1) % 24; break;
+      case 41: schedules[editIdx].minute = (schedules[editIdx].minute + 1) % 60; break;
+      case 42: editIdx = (editIdx + 1) % 3; break;
+      case 43: if (schedules[editIdx].gram <= 390) { schedules[editIdx].gram += 10; } break;
+      case 44: schedules[editIdx].hour = (schedules[editIdx].hour == 0) ? 23 : schedules[editIdx].hour - 1; break;
+      case 45: schedules[editIdx].minute = (schedules[editIdx].minute == 0) ? 59 : schedules[editIdx].minute - 1; break;
+      case 46: editIdx = (editIdx == 0) ? 2 : editIdx - 1; break;
+      case 47: if (schedules[editIdx].gram > 10) { schedules[editIdx].gram -= 10; } break;
       case 48:
-        schedules[editIdx].active = true;
-        saveSettings();
-        DEBUG_PRINTF("Saved Slot %d: %02d:%02d (%ds)\n", editIdx + 1, schedules[editIdx].hour, schedules[editIdx].minute, schedules[editIdx].gram);
+        schedules[editIdx].active = true; saveSettings();
         if (WiFi.status() == WL_CONNECTED) {
-          char timeStr[6];
-          sprintf(timeStr, "%02d:%02d", schedules[editIdx].hour, schedules[editIdx].minute);
+          char timeStr[6]; sprintf(timeStr, "%02d:%02d", schedules[editIdx].hour, schedules[editIdx].minute);
           String json = "{\"type\":\"add_schedule_from_esp\", \"token\":\"" + String(myToken) + "\", \"time\":\"" + String(timeStr) + "\", \"duration\":" + String(schedules[editIdx].gram) + ", \"slot\":" + String(editIdx + 1) + "}";
           client.send(json);
-          DEBUG_PRINTLN("📤 Synced Schedule to Server: " + json);
         }
-        drawMenuPage();
-        break;
-      case 49:
-        drawMenuPage();
-        break;
-      case 50:
-      case 51:
-      case 52:
-        confirmMode = 2;
-        deleteIdx = lastAction - 50;
-        drawConfirmPage("Confirm Delete", "Round: " + String(deleteIdx + 1), 2);
-        break;
-
-      case 60:
-        limitBowlFood += 100;
-        updateLimitValues();
-        restoreLimitButton(60);
-        break;
-      case 61:
-        if (limitBowlFood > 100) limitBowlFood -= 100;
-        updateLimitValues();
-        restoreLimitButton(61);
-        break;
-      case 62:
-        limitBowlWater += 100;
-        updateLimitValues();
-        restoreLimitButton(62);
-        break;
-      case 63:
-        if (limitBowlWater > 100) limitBowlWater -= 100;
-        updateLimitValues();
-        restoreLimitButton(63);
-        break;
-
+        drawMenuPage(); break;
+      case 49: drawMenuPage(); break;
+      case 50: case 51: case 52:
+        confirmMode = 2; deleteIdx = lastAction - 50; drawConfirmPage("Confirm Delete", "Round: " + String(deleteIdx + 1), 2); break;
+      case 60: limitBowlFood += 100; updateLimitValues(); restoreLimitButton(60); break;
+      case 61: if (limitBowlFood > 100) limitBowlFood -= 100; updateLimitValues(); restoreLimitButton(61); break;
+      case 62: limitBowlWater += 100; updateLimitValues(); restoreLimitButton(62); break;
+      case 63: if (limitBowlWater > 100) limitBowlWater -= 100; updateLimitValues(); restoreLimitButton(63); break;
       case 70:
-        maintenanceMode = !maintenanceMode;
-        if (maintenanceMode) {
-          feedServo.detach();
-          DEBUG_PRINTLN(">>> System LOCKED by User");
-        } else {
-          DEBUG_PRINTLN(">>> System UNLOCKED");
-        }
-        drawSetUpPage();
-        break;
+        maintenanceMode = !maintenanceMode; if (maintenanceMode) feedServo.detach();
+        drawSetUpPage(); break;
     }
-    if (lastAction >= 40 && lastAction <= 47) {
-      updateSetTimeValues();
-    }
+    if (lastAction >= 40 && lastAction <= 47) updateSetTimeValues();
     setTimeEffectButton(lastAction);
     actionButton = 0;
   }
@@ -1934,128 +1316,102 @@ void executePendingAction(unsigned long now) {
 // ======================= 🎬 หมวดที่ 13: MAIN EXECUTION ========================
 // ============================================================================
 void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // 🌟 ปิดระบบไฟกระชาก
   Serial.begin(115200);
 
-  // 🌟🌟🌟 THE MAGIC FIX V2 (Wake up Hardware) 🌟🌟🌟
-  // 1. เคลียร์สาย I2C (เลเซอร์ VL53L0X) ให้หลุดจากอาการค้าง
-  pinMode(21, INPUT_PULLUP);  // SDA ปล่อยเป็น Input ชั่วคราวไม่ให้ชนกับเซนเซอร์
-  pinMode(22, OUTPUT);        // SCL ขานาฬิกา
+  pinMode(21, INPUT_PULLUP);  
+  pinMode(22, OUTPUT);        
   for (int i = 0; i < 10; i++) {
-    digitalWrite(22, LOW);
-    delayMicroseconds(10);
-    digitalWrite(22, HIGH);
-    delayMicroseconds(10);
+    digitalWrite(22, LOW); delayMicroseconds(10);
+    digitalWrite(22, HIGH); delayMicroseconds(10);
   }
   Wire.begin(21, 22);
 
-  // 2. ปลุกตาชั่ง (HX711) ให้ตื่นจากการ Sleep (ดึง SCK กลับมาเป็น LOW)
-  pinMode(HX_BowlWater_SCK, OUTPUT);
-  digitalWrite(HX_BowlWater_SCK, LOW);
-  pinMode(HX_TankWater_SCK, OUTPUT);
-  digitalWrite(HX_TankWater_SCK, LOW);
-  pinMode(HX_BowlFood_SCK, OUTPUT);
-  digitalWrite(HX_BowlFood_SCK, LOW);
-  delay(10);  // รอให้ชิปตาชั่งเซ็ตอัปตัวเองแป๊บเดียว
-  // 🌟🌟🌟 END MAGIC FIX V2 🌟🌟🌟
+  pinMode(HX_BowlWater_SCK, OUTPUT); digitalWrite(HX_BowlWater_SCK, LOW);
+  pinMode(HX_TankWater_SCK, OUTPUT); digitalWrite(HX_TankWater_SCK, LOW);
+  pinMode(HX_BowlFood_SCK, OUTPUT); digitalWrite(HX_BowlFood_SCK, LOW);
+  delay(10);  
 
-  rtcStart();  // เปิดนาฬิกา Hardware
+  rtcStart();  
+  WiFi.onEvent(onWiFiEvent);
 
-  if (!wifiStatus && checkRtc) {
-    syncSystemTimeFromRtc();
-  }
+  if (!wifiStatus && checkRtc) syncSystemTimeFromRtc();
 
-  if (!EEPROM.begin(EEPROM_SIZE)) {
-    DEBUG_PRINTLN("failed to initialise EEPROM");
+  if (!EEPROM.begin(EEPROM_SIZE)) DEBUG_PRINTLN("failed to initialise EEPROM");
+  else loadSettings();
+
+  pinMode(PUMP_PIN, OUTPUT); digitalWrite(PUMP_PIN, LOW);
+  feedServo.attach(SERVO_PIN); feedServo.write(SPEED_STOP); delay(300); feedServo.detach();
+
+  // 🌟 ปรับ baud rate ตามคำแนะนำให้เร็วขึ้น (ต้องแก้ที่บอร์ด CAM ให้เป็น 115200 ด้วยนะ!)
+  CamSerial.begin(115200, SERIAL_8N1, 35, 2); 
+
+  tft.init(); tft.setRotation(1); ts.begin();
+
+  // 🌟 แจ้งสถานะบนจอโดยอิงจากความจำ (ไม่ให้กระพริบซ้ำๆ)
+  tft.fillScreen(TFT_BLACK); tft.setTextSize(2);
+  if (bootStatusFlag == 1) {
+    tft.setTextColor(TFT_YELLOW); tft.setCursor(40, 100); tft.print("Preparing Setup...");
+  } else if (bootStatusFlag == 2) {
+    tft.setTextColor(TFT_GREEN); tft.setCursor(30, 100); tft.print("Applying New WiFi...");
   } else {
-    loadSettings();
+    tft.setTextColor(TFT_WHITE); tft.setCursor(50, 100); tft.print("Connecting WiFi...");
   }
-
-  // เซ็ตอัพระบบ Relay ปั๊มน้ำ
-  pinMode(PUMP_PIN, OUTPUT);
-  digitalWrite(PUMP_PIN, LOW);
-
-  // เทสขยับ Servo ตอนเริ่มเครื่อง
-  feedServo.attach(SERVO_PIN);
-  feedServo.write(SPEED_STOP);
-  delay(300);
-  feedServo.detach();
-
-  CamSerial.begin(9600, SERIAL_8N1, 35, 2);
-
-  // 🌟 เปิดหน้าจอขึ้นมาก่อน (กันจอดำตอนรอเชื่อมเน็ต)
-  tft.init();
-  tft.setRotation(1);
-  ts.begin();
-
-  // 💡 วาดหน้าจอบอกสถานะตอนเสียบปลั๊กกำลังต่อเน็ต
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(60, 100);
-  tft.print("Connecting WiFi...");
 
   startWifi();
 
-  // เตรียมระบบรอรับโค้ดลอยฟ้า (OTA)
-  // เตรียมระบบรอรับโค้ดลอยฟ้า (OTA)
+  bootStatusFlag = 0; // เคลียร์สถานะ
+  tft.fillScreen(TFT_BLACK);
+
   ArduinoOTA.setHostname("Smart-Pet-ESP32-30PIN");
   ArduinoOTA.setPassword("1234");
   ArduinoOTA.onStart([]() {
     DEBUG_PRINTLN("\n>>> Start OTA Update... Stopping all hardware!");
-    // ตัดไฟมอเตอร์และปั๊มน้ำ ป้องกันอุปกรณ์ทำงานค้างตอนอัปเดต
-    digitalWrite(PUMP_PIN, LOW);
-    feedServo.detach();
-    client.close();  // ปิดการสตรีมมิ่ง WebSocket เพื่อคืน RAM
+    digitalWrite(PUMP_PIN, LOW); feedServo.detach(); client.close();  
   });
   ArduinoOTA.begin();
   
   drawHomePage();
 
-  // ตั้งค่าเซนเซอร์
   loadCellBowlFood();
   loadCellBowlWater();
   loadCellTankWater();
   vl53l0xFood();
-
-  // 🌟 อ่าน Tank level ทันทีตอนเปิดเครื่อง ไม่ให้ค้างที่ 0%
-  updateTankLevel();
+  updateTankLevel(); // 🌟 บังคับให้อ่านเลเซอร์ถังอาหารทันทีตอนเปิดเครื่อง (ไม่ต้องรอ 5 วิ)
 
   client.onMessage(onMessageCallback);
-
-  // 🛠️ โค้ดช่าง: เก็บไว้ใช้วัดค่า Tare Offset ถาดน้ำหนักเมื่อเปลี่ยนชามใหม่
-  // DEBUG_PRINTLN("=== TARE OFFSETS ===");
-  // DEBUG_PRINTLN(LoadCell_BowlFood.getTareOffset());
-  // DEBUG_PRINTLN(LoadCell_BowlWater.getTareOffset());
-  // DEBUG_PRINTLN(LoadCell_TankWater.getTareOffset());
 }
 
 void loop() {
-  ArduinoOTA.handle();  // คอยเช็คว่ามีการกดอัปโหลด OTA เข้ามาไหม
+  ArduinoOTA.handle();  
+  unsigned long currentTime = millis();  
 
-  unsigned long currentTime = millis();  // 💡 ใช้เวลาตรงนี้เป็นฐานให้ทุกระบบทำงานโดยไม่อ้างอิง delay()
+  if (shouldCloseClient) {
+    client.close();
+    shouldCloseClient = false;
+  }
+  if (forceCheckInternet) {
+    wifiStatus = hasInternet();
+    forceCheckInternet = false;
+  }
 
-  // --- 1. ตรวจสอบการเชื่อมต่อ ---
   checkInternetConnection(currentTime);
   checkStatusWifi();
   handleCameraSync(currentTime);
   handleWebSocket(currentTime);
 
-  // --- 2. รับคำสั่งจากหน้าจอทัชสกรีน ---
   executePendingAction(currentTime);
   checkTouch(currentTime);
-  updateHomeDynamic(currentTime);  // 💡 อัปเดตเฉพาะตัวหนังสือบนจอเพื่อไม่ให้กระพริบ
+  updateHomeDynamic(currentTime);  
 
-  // --- 3. อ่านค่าเซนเซอร์แบบ Real-time ---
   loadCellBowlFoodWork(currentTime);
   vl53l0xFoodWork(currentTime);
   loadCellWaterBowlWork();
   loadCellWaterTankWork();
 
-  // --- 4. สมองกลประมวลผลการทำงาน ---
   processSchedule(currentTime);
   processFeeder(currentTime);
   processWater(currentTime);
 
-  // 🛠️ โค้ดช่าง: เก็บไว้เช็คเปอร์เซ็นต์ RAM ที่ว่างอยู่
   // checkESP32_RAM(currentTime);
 }
