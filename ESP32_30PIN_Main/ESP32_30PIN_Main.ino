@@ -761,11 +761,29 @@ void checkESP32_RAM(unsigned long now) {
 
 void startFeeding(int value, FeedMode mode, unsigned long now) {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   if (maintenanceMode || tankFood <= 0) {
     DEBUG_PRINTLN("!!! BLOCKED: Maintenance Mode ON or Food Tank is EMPTY !!!");
 =======
   if (maintenanceMode) {
     DEBUG_PRINTLN("!!! BLOCKED: Maintenance Mode ON !!!");
+=======
+  if (maintenanceMode) {
+    DEBUG_PRINTLN("!!! BLOCKED: Maintenance Mode ON !!!");
+    currentFeedAmount = 0;
+    currentFeedSource = "";
+    return;
+  }
+
+  // 🌟 ถ้า tankFood = 0 ให้ force update sensor ทันที ไม่ต้องรอ loop
+  if (tankFood == 0) {
+    DEBUG_PRINTLN(">>> Tank Food = 0, force updating sensor...");
+    updateTankLevel();
+  }
+
+  if (tankFood <= 0) {
+    DEBUG_PRINTLN("!!! BLOCKED: Food Tank is EMPTY !!!");
+>>>>>>> Stashed changes
     currentFeedAmount = 0;
     currentFeedSource = "";
     return;
