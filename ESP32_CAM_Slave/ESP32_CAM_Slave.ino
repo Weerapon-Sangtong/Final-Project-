@@ -34,17 +34,10 @@ WebsocketsClient client;
 // ==========================================
 // ⚙️ หมวดที่ 2: NETWORK & SERVER SETTINGS
 // ==========================================
-// 🌟 HARDCODED CREDENTIALS - สามารถเปลี่ยนได้ตรงนี้
-// 💡 สำหรับ production ควร use WiFiManager custom parameters เพื่อให้ configurable runtime
 const char* server_ip = "34.45.167.7";   // IP ของเซิร์ฟเวอร์
 const uint16_t server_port = 4000;       // Port สำหรับส่งข้อมูล
 const char* myToken = "ESP32-CAM-001";   // รหัสยืนยันตัวตนของกล้อง
-
-// 📝 WiFiManager Custom Parameter Example (ถ้าต้องการแก้ runtime):
-// AutoConnectParameter custom_host("host", "Server IP", server_ip, 20);
-// AutoConnectParameter custom_port("port", "Server Port", "4000", 10);
-// AutoConnectParameter custom_token("token", "Device Token", myToken, 32);
-// จากนั้น addParameter และอ่านค่าหลัง autoConnect
+const char* deviceRole = "camera";
 
 // ==========================================
 // 🔌 หมวดที่ 3: CAMERA PIN DEFINITIONS (ขาอุปกรณ์ของเลนส์)
@@ -71,10 +64,10 @@ const char* myToken = "ESP32-CAM-001";   // รหัสยืนยันตั
 // ==========================================
 // ⏱️ หมวดที่ 4: TIMERS & VARIABLES (ตัวแปรระบบ)
 // ==========================================
-const int captureInterval = 100;                    // ความถี่การส่งภาพ (100ms = 10 เฟรมต่อวินาที เน้นเสถียร)
+const int captureInterval = 150;                    // ความถี่การส่งภาพ (50ms = 20 เฟรมต่อวินาที เน้นเสถียร)
 const unsigned long FLASH_DURATION = 1000;         // เวลาเปิดไฟแฟลช (1000ms = 1 วินาที)
 const unsigned long WS_RECONNECT_INTERVAL = 5000;  // ดีเลย์รอต่อ WebSocket ใหม่ (5 วินาที)
-const unsigned long WIFI_TIMEOUT_MS = 30000;       // เวลาสูงสุดในการพยายามเชื่อม WiFi (30 วินาที)
+const unsigned long WIFI_TIMEOUT_MS = 30000;       // เวลาสูงสุดในการพยายามเชื่อม WiFi (10 วินาที)
 
 String currentSSID = "";
 String currentPASS = "";
@@ -124,11 +117,8 @@ void init_camera() {
 
   // 💡 ถ้ากล้องพัง สายแพหลุด หรือลืมเปิด PSRAM มันจะทำงานเข้า if ตัวนี้แล้วจบการทำงานเลย
   if (esp_camera_init(&config) != ESP_OK) {
-    DEBUG_PRINTLN("❌ Camera Init Failed! System HALT");
-    while(1) {
-      delay(1000);  // 🌟 ค้างอยู่ที่นี่ - ป้องกันเข้า loop() เพราะจะ crash
-    }
-    return;
+    DEBUG_PRINTLN("❌ Camera Init Failed");
+    return;  
   }
   DEBUG_PRINTLN("✅ Camera Init OK");
 }
@@ -136,21 +126,23 @@ void init_camera() {
 void connectToWiFi(String ssid, String pass) {
   if (ssid == "") return;
 
-  // ดักจับ: ถ้าส่งรหัสเดิมมา แล้วบอร์ดกำลังต่อเน็ตอยู่ ให้ข้ามไปเลย
   if (ssid == currentSSID && (WiFi.status() == WL_CONNECTED || isConnectingWiFi)) return;
 
-  // 🌟 [จุดสำคัญ!] ปิด WebSocket เก่าก่อนการเชื่อม WiFi ใหม่
   client.close();
-  delay(500);
+  delay(300);
 
-  // 🌟 บังคับให้ลืม IP เดิม เพื่อไปขอ IP ใหม่จากเราเตอร์ตัวใหม่
-  WiFi.config(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0));
-
-  // 🌟 สูตรลับความลื่น: บังคับโหมดลูกข่าย และไม่ให้ WiFi แอบหลับ (ช่วยให้สตรีมไม่กระตุก)
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
+
+  WiFi.config(IPAddress(0, 0, 0, 0),
+              IPAddress(0, 0, 0, 0),
+              IPAddress(0, 0, 0, 0));
 
   WiFi.disconnect();
+  delay(300);
+
   WiFi.begin(ssid.c_str(), pass.c_str());
 
   currentSSID = ssid;
@@ -219,69 +211,72 @@ void processCameraStream(unsigned long now) {
 
   static unsigned long lastWsConnect = 0;
 
-  // 1. เช็คว่าหลุดจากเซิร์ฟเวอร์ไหม ถ้าหลุดให้พยายามต่อใหม่
+  client.poll();
+
   if (!client.available()) {
     if (now - lastWsConnect > WS_RECONNECT_INTERVAL) {
       lastWsConnect = now;
 
-      DEBUG_PRINTLN(">>> 🌐 Reconnecting to Camera WebSocket (Force Close)...");
+      DEBUG_PRINTLN(">>> 🌐 Connecting to Camera WebSocket...");
 
-      // 🌟 ปิด connection เก่าอย่างชัดแจ้ง ไม่ใช่แค่รอ
       client.close();
       delay(300);
 
       if (client.connect(server_ip, server_port, "/")) {
-        client.send("{\"type\":\"register\", \"token\":\"" + String(myToken) + "\"}");
+        client.onMessage(onMessageCallback);
+
+        client.send("{\"type\":\"register\", \"role\":\"camera\", \"token\":\"" + String(myToken) + "\"}");
+
         DEBUG_PRINTLN("✅ Camera WebSocket Connected!");
       } else {
-        DEBUG_PRINTLN("❌ Camera WebSocket Connect Failed");
+        DEBUG_PRINTLN("❌ Camera WebSocket Failed");
       }
     }
-    return;  // ออกจากฟังก์ชัน ถ้ายังไม่เชื่อมต่อ
+
+    return;
   }
 
-  // 2. ถ้าเชื่อมต่ออยู่ ให้ poll ข้อมูล
-  client.poll();
-
-  // 3. จับภาพและยิงขึ้นเซิร์ฟเวอร์ตามรอบเวลา (captureInterval)
   if (now - lastCaptureTime > captureInterval) {
     lastCaptureTime = now;
 
-    if (client.available()) {
-      camera_fb_t* fb = esp_camera_fb_get(); // ถ่ายรูป 1 ช็อต
-      if (fb) {
-        client.sendBinary((const char*)fb->buf, fb->len); // ส่งรูปขึ้นเว็บ
-        esp_camera_fb_return(fb);  // คืนหน่วยความจำกลับให้ระบบ
-      }
+    camera_fb_t* fb = esp_camera_fb_get();
+
+    if (fb) {
+      client.sendBinary((const char*)fb->buf, fb->len);
+      esp_camera_fb_return(fb);
     }
   }
 }
 
 void checkWiFiStatus(unsigned long now) {
   // ทันทีที่ต่อเน็ตติดครั้งแรก ให้ปลุกระบบ OTA ขึ้นมารอ
-  if (WiFi.status() == WL_CONNECTED) {
-    if (!otaInitialized) {
-        ArduinoOTA.setHostname("Smart-Pet-ESP32-CAM");
-        ArduinoOTA.setPassword("1234");
+  if (WiFi.status() == WL_CONNECTED && !otaInitialized) {
+      ArduinoOTA.setHostname("Smart-Pet-ESP32-CAM");
+      ArduinoOTA.setPassword("1234");
+      
+      ArduinoOTA.onStart([]() {
+        DEBUG_PRINTLN("\n>>> Start OTA Update for CAM...");
 
-        ArduinoOTA.onStart([]() {
-          DEBUG_PRINTLN("\n>>> Start OTA Update for CAM...");
-          isOTAUpdating = true;
-          client.close(); // ปิดการสตรีมมิ่งทันทีเพื่อคืน RAM ให้ระบบ OTA
-        });
+        isOTAUpdating = true;
 
-        ArduinoOTA.begin();
-        otaInitialized = true;
-        DEBUG_PRINTLN("☁️ OTA Initialized for CAM");
-    }
-  } else {
-    // 🌟 [เพิ่มเติม] ลบ OTA state ถ้า WiFi disconnect
-    if (otaInitialized) {
-        ArduinoOTA.end();
-        otaInitialized = false;
-        DEBUG_PRINTLN("⚠️ OTA Ended (WiFi Disconnected)");
-    }
-    isConnectingWiFi = false;
+        client.close();
+        delay(300);
+
+        digitalWrite(FLASH_GPIO_NUM, LOW);
+
+        esp_camera_deinit();
+      });
+
+      ArduinoOTA.onError([](ota_error_t error) {
+        DEBUG_PRINT("OTA Error: ");
+        DEBUG_PRINTLN(error);
+
+        ESP.restart();
+      });
+
+      ArduinoOTA.begin();
+      otaInitialized = true;
+      DEBUG_PRINTLN("☁️ OTA Initialized for CAM");
   }
 
   if (isConnectingWiFi) {
@@ -289,9 +284,9 @@ void checkWiFiStatus(unsigned long now) {
       isConnectingWiFi = false;
       DEBUG_PRINTLN("✅ CAM_CONNECTED_TO_WIFI");
     }
-    // หมดเวลาพยายามต่อเน็ต (30 วิ) ให้หยุดพักป้องกันบอร์ดเอ๋อ
+    // หมดเวลาพยายามต่อเน็ต (10 วิ) ให้หยุดพักป้องกันบอร์ดเอ๋อ
     else if (now - wifiStartTime > WIFI_TIMEOUT_MS) {
-      isConnectingWiFi = false;
+      isConnectingWiFi = false; 
       DEBUG_PRINTLN("❌ WiFi Connection Timeout!");
     }
   }
@@ -331,12 +326,8 @@ void setup() {
   // 🌟 ปิดระบบเซนเซอร์ไฟกระชาก (Brown-out detector) เพื่อกันบอร์ดดับตอนกล้องดึงกระแสไฟ
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
-  Serial.begin(115200);  // 🌟 เพิ่มความเร็วจาก 9600 เป็น 115200 เพื่อลด latency
+  Serial.begin(9600);    // 💡 ห้ามใช้ DEBUG_PRINT ตรงนี้ เพราะต้องเอาไว้อ่านค่า WiFi จากบอร์ดแม่จริงๆ
   Serial.setTimeout(10); // ลดเวลา Timeout ป้องกันบอร์ดค้างเวลารอรับ Serial
-
-  // 🌟 เปิด WiFi auto-reconnect ที่ระดับ OS
-  WiFi.setAutoReconnect(true);
-  WiFi.persistent(true);
 
   pinMode(FLASH_GPIO_NUM, OUTPUT);
   digitalWrite(FLASH_GPIO_NUM, LOW);
@@ -347,24 +338,18 @@ void setup() {
 }
 
 void loop() {
-  // 1. จัดการระบบอัปเดตโค้ดไร้สาย (OTA)
   if (otaInitialized) {
     ArduinoOTA.handle();
   }
-  
-  // 💡 🗑️ ลบ ArduinoOTA.handle() ซ้ำซ้อนทิ้งไป 1 บรรทัด
-  // ถ้ากำลังอัปเดตโค้ดอยู่ ให้ตัดจบการทำงานส่วนอื่นทันที ป้องกัน RAM เต็มจนแครช
+
   if (isOTAUpdating) {
-    return; 
+    return;
   }
 
-  // 2. ลำดับการทำงานปกติของกล้อง
-  unsigned long now = millis();  
-  checkFlashTimeout(now);        // เช็คเวลาปิดไฟแฟลช
-  checkSerialWiFi();             // แอบฟังชื่อ WiFi จากบอร์ดแม่
-  checkWiFiStatus(now);          // จัดการสถานะเน็ตและเปิดระบบ OTA
-  processCameraStream(now);      // สตรีมมิ่งวิดีโอ
-  
-  // 🛠️ โค้ดช่าง: เก็บไว้เช็คเปอร์เซ็นต์ RAM ที่ว่างอยู่
-  // checkESP32_RAM(now);        // พิมพ์รายงานสถานะ Memory ทุกๆ 10 วินาที
+  unsigned long now = millis();
+
+  checkFlashTimeout(now);
+  checkSerialWiFi();
+  checkWiFiStatus(now);
+  processCameraStream(now);
 }
