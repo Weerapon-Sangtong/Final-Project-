@@ -73,11 +73,11 @@ const unsigned long WATER_TIMEOUT_MS = 40000;
 const int TANK_EMPTY = 450;  
 const int TANK_FULL = 50;    
 
-const unsigned long TANK_CHECK_INTERVAL_MS = 5000;    
+const unsigned long TANK_CHECK_INTERVAL_MS = 15000;    
 const unsigned long CAM_SYNC_INTERVAL = 60000;         
 const unsigned long DELAY_SCHEDUIE = 1000;             
 const unsigned long WEBSOCKET_SEND_INTERVAL = 3000;    
-const unsigned long WEBSOCKET_RETRY_INTERVAL = 10000;  
+const unsigned long WEBSOCKET_RETRY_INTERVAL = 30000;  
 const unsigned long END_DELAY_NET_CHECK = 60000;
 const unsigned long END_DELAY_WIFI_RETRY = 30000;
 const unsigned long END_DELAY_SCREEN = 1000;
@@ -202,8 +202,7 @@ unsigned long waterWaitTimer = 0;
 // ======================= 🔧 หมวดที่ 7: UTILITIES & EEPROM =====================
 // ============================================================================
 bool hasInternet() {
-  WiFiClient client;
-  return client.connect("8.8.8.8", 53);
+  return WiFi.status() == WL_CONNECTED;
 }
 
 void saveSettings() {
@@ -278,7 +277,7 @@ void syncSystemTimeFromRtc() {
 }
 
 void vl53l0xFood() {
-  tankSensor.setTimeout(500);
+  tankSensor.setTimeout(100);
   if (tankSensor.init()) {
     tankSensor.stopContinuous();
   }
@@ -309,43 +308,56 @@ void loadCellTankWater() {
 }
 
 void updateTankLevel() {
-  DEBUG_PRINTLN(">>> Checking Tank Level (Advanced Filter)...");
+  unsigned long start = millis();
+
+  DEBUG_PRINTLN(">>> Checking Tank Level...");
+
   tankSensor.startContinuous();
+
   long totalDistance = 0;
   int validReadings = 0;
 
-  for (int i = 0; i < 10; i++) {
+  for (int i = 0; i < 5; i++) {
     int distance = tankSensor.readRangeContinuousMillimeters();
+
+    if (tankSensor.timeoutOccurred()) {
+      DEBUG_PRINTLN("VL53L0X timeout!");
+      break;
+    }
+
     if (distance > 10 && distance < 8000 && distance < (TANK_EMPTY + 100)) {
       totalDistance += distance;
       validReadings++;
     }
-    delay(10);
+
+    delay(5);
   }
+
   tankSensor.stopContinuous();
 
   if (validReadings > 0) {
     int currentDistance = totalDistance / validReadings;
+
     static int smoothDistance = -1;
     if (smoothDistance == -1) {
       smoothDistance = currentDistance;
     } else {
       smoothDistance = (smoothDistance * 0.7) + (currentDistance * 0.3);
     }
-    DEBUG_PRINT("Raw: ");
-    DEBUG_PRINT(currentDistance);
-    DEBUG_PRINT("mm | Smooth: ");
-    DEBUG_PRINT(smoothDistance);
-    DEBUG_PRINTLN("mm");
 
     int percent = map(smoothDistance, TANK_EMPTY, TANK_FULL, 0, 100);
     tankFood = constrain(percent, 0, 100);
+
     DEBUG_PRINT("Final Food: ");
     DEBUG_PRINT(tankFood);
     DEBUG_PRINTLN("%");
   } else {
-    DEBUG_PRINTLN("Error: Sensor blocked or out of range!");
+    DEBUG_PRINTLN("Error: No valid tank readings!");
   }
+
+  DEBUG_PRINT("updateTankLevel time = ");
+  DEBUG_PRINT(millis() - start);
+  DEBUG_PRINTLN(" ms");
 }
 
 void loadCellBowlFoodWork(unsigned long now) {
@@ -447,7 +459,9 @@ void startWifi() {
   WiFi.persistent(true);
 
   wm.setAPCallback(configModeCallback);
-  wm.setConfigPortalTimeout(120);
+
+  // ให้เปิด portal แค่ 120 วิ ถ้าไม่มีคนตั้งค่า ให้เข้า offline mode
+  wm.setConfigPortalTimeout(60);
 
   bool connected = wm.autoConnect("Smart Pet Feeder");
 
@@ -459,7 +473,7 @@ void startWifi() {
     client.close();
     delay(500);
 
-    wifiStatus = hasInternet();
+    wifiStatus = true;
 
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     ntpStarted = true;
@@ -469,8 +483,26 @@ void startWifi() {
 
     forceUpdateTank = true;
   } else {
-    DEBUG_PRINTLN("❌ WiFi Connect Failed");
-    ESP.restart();
+    DEBUG_PRINTLN("⚠️ WiFi not connected. Starting OFFLINE MODE...");
+
+    wifiStatus = false;
+    lastWifiStatus = true;
+    ntpStarted = false;
+    rtcBoot = false;
+
+    client.close();
+
+    // ปิด WiFi STA/AP ที่ WiFiManager เปิดไว้ เพื่อไม่ให้วน config portal
+    WiFi.disconnect(false, false);
+    WiFi.mode(WIFI_OFF);
+    delay(300);
+
+    // กลับไปทำงานแบบไม่มี WiFi
+    if (checkRtc) {
+      syncSystemTimeFromRtc();
+    }
+
+    forceUpdateTank = true;
   }
 }
 
@@ -489,9 +521,11 @@ void checkInternetConnection(unsigned long currentTime) {
       configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
       ntpStarted = true;
     }
+
     if (currentTime - startDelayNetCheck >= END_DELAY_NET_CHECK) {
       startDelayNetCheck = currentTime;
-      wifiStatus = hasInternet();
+      wifiStatus = true;
+
       if (wifiStatus && checkRtc && !rtcBoot) {
         syncRtcFromNtp();
       }
@@ -500,8 +534,15 @@ void checkInternetConnection(unsigned long currentTime) {
     wifiStatus = false;
     rtcBoot = false;
     ntpStarted = false;
+
+    // ถ้าปิด WiFi ไปแล้ว แปลว่าอยู่ offline mode ไม่ต้อง WiFi.begin()
+    if (WiFi.getMode() == WIFI_OFF) {
+      return;
+    }
+
     if (currentTime - startDelayWifiRetry >= END_DELAY_WIFI_RETRY) {
       startDelayWifiRetry = currentTime;
+
       if (WiFi.status() == WL_IDLE_STATUS || WiFi.status() == WL_DISCONNECTED) {
         WiFi.begin();
       }
@@ -579,28 +620,44 @@ void onMessageCallback(WebsocketsMessage message) {
 
     const char* type = doc["type"];
 
-    if (!type) return;
+    if (!type) {
+      DEBUG_PRINTLN("❌ JSON has no type");
+      return;
+    }
 
     if (strcmp(type, "manual_feed") == 0) {
       int feedGram = doc["amount"];
+
       if (feedGram > 0) {
         DEBUG_PRINTF("🌐 Web requested manual feed: %dg\n", feedGram);
         startFeeding(feedGram, ADD_MORE, millis());
       } else {
         DEBUG_PRINTLN("⚠️ Warning: manual_feed amount is 0 or invalid!");
       }
+
     } else if (strcmp(type, "schedule_update") == 0) {
+      DEBUG_PRINTLN("✅ schedule_update received");
+
       const char* rawSchedule = doc["raw"];
+
       if (rawSchedule) {
         DEBUG_PRINTLN("📥 Received Schedule: " + String(rawSchedule));
+
         parseScheduleFromWebSocket(String(rawSchedule));
 
-        if (WiFi.status() == WL_CONNECTED) {
+        if (WiFi.status() == WL_CONNECTED && client.available()) {
           String ackJson = "{\"type\":\"ack\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\", \"msg\":\"schedule_updated\"}";
           client.send(ackJson);
           DEBUG_PRINTLN("📤 Sent ACK to Server: " + ackJson);
         }
+
+      } else {
+        DEBUG_PRINTLN("❌ schedule_update received but raw is missing");
+        DEBUG_PRINTLN("📥 Full message: " + data);
       }
+
+    } else {
+      DEBUG_PRINTLN("⚠️ Unknown JSON type: " + String(type));
     }
 
   } else {
@@ -610,35 +667,67 @@ void onMessageCallback(WebsocketsMessage message) {
 
 void handleWebSocket(unsigned long now) {
   static unsigned long lastWsConnect = 0;
+  static unsigned long lastWsDebug = 0;
+
+  if (WiFi.getMode() == WIFI_OFF) {
+    return;
+  }
 
   if (WiFi.status() != WL_CONNECTED) {
     client.close();
     return;
   }
 
+  if (now - lastWsDebug > 5000) {
+    lastWsDebug = now;
+    DEBUG_PRINT("WS CHECK | WiFi.status=");
+    DEBUG_PRINT(WiFi.status());
+    DEBUG_PRINT(" | client.available=");
+    DEBUG_PRINTLN(client.available());
+  }
+
   client.poll();
 
   if (!client.available()) {
-    if (now - lastWsConnect > WEBSOCKET_RETRY_INTERVAL) {
-      lastWsConnect = now;
 
-      DEBUG_PRINTLN("Connecting to WebSocket...");
-
-      client.close();
-      delay(300);
-
-      bool connected = client.connect(websocket_server_host, server_port, "/");
-
-      if (connected) {
-        DEBUG_PRINTLN("✅ WebSocket Connected!");
-
-        client.onMessage(onMessageCallback);
-
-        client.send("{\"type\":\"register\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\"}");
-      } else {
-        DEBUG_PRINTLN("❌ WebSocket Connect Failed");
-      }
+    // อย่าพยายามต่อถี่เกินไป เพราะ connect อาจบล็อกหลายวินาที
+    if (now - lastWsConnect < 30000) {
+      return;
     }
+
+    lastWsConnect = now;
+
+    DEBUG_PRINTLN("Checking server before WebSocket...");
+
+    // เช็กก่อนว่า server เปิดอยู่ไหม โดยให้ timeout สั้นมาก
+    WiFiClient testClient;
+    testClient.setTimeout(300);
+
+    bool serverReachable = testClient.connect(websocket_server_host, server_port);
+    testClient.stop();
+
+    if (!serverReachable) {
+      DEBUG_PRINTLN("❌ Server not reachable. Skip WebSocket connect.");
+      return;
+    }
+
+    DEBUG_PRINTLN("Connecting to WebSocket...");
+
+    client.close();
+    delay(100);
+
+    bool connected = client.connect(websocket_server_host, server_port, "/");
+
+    if (connected) {
+      DEBUG_PRINTLN("✅ WebSocket Connected!");
+
+      client.onMessage(onMessageCallback);
+
+      client.send("{\"type\":\"register\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\"}");
+    } else {
+      DEBUG_PRINTLN("❌ WebSocket Connect Failed");
+    }
+
     return;
   }
 
@@ -647,6 +736,7 @@ void handleWebSocket(unsigned long now) {
 
     String json = "{\"type\":\"update_sensor\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\", \"food\":" + String(tankFood) + ", \"water\":" + String(tankWater) + ", \"bowlFood\":" + String(bowlFood) + ", \"bowlWater\":" + String(bowlWater) + "}";
 
+    DEBUG_PRINTLN("📤 Sent Sensor: " + json);
     client.send(json);
   }
 }
@@ -666,12 +756,18 @@ void sendWifiToCam() {
     CamSerial.print(dataPacket);
     delay(100);
     CamSerial.print(dataPacket);
+    delay(100);
+    CamSerial.print(dataPacket);
 
     DEBUG_PRINTLN("📤 Sent WiFi to CAM SSID: " + ssid);
   }
 }
 
 void handleCameraSync(unsigned long now) {
+  if (WiFi.getMode() == WIFI_OFF) {
+    return;
+  }
+
   if (now - lastCamSync >= CAM_SYNC_INTERVAL) {
     lastCamSync = now;
     sendWifiToCam();
@@ -1995,7 +2091,7 @@ void setup() {
   delay(300);
   feedServo.detach();
 
-  CamSerial.begin(9600, SERIAL_8N1, 35, 2);
+  CamSerial.begin(115200, SERIAL_8N1, 35, 2);
 
   // 🌟 เปิดหน้าจอขึ้นมาก่อน (กันจอดำตอนรอเชื่อมเน็ต)
   tft.init();
@@ -2048,13 +2144,7 @@ void loop() {
   ArduinoOTA.handle();  // คอยเช็คว่ามีการกดอัปโหลด OTA เข้ามาไหม
 
   unsigned long currentTime = millis();  // 💡 ใช้เวลาตรงนี้เป็นฐานให้ทุกระบบทำงานโดยไม่อ้างอิง delay()
-
-  // --- 1. ตรวจสอบการเชื่อมต่อ ---
-  checkInternetConnection(currentTime);
-  checkStatusWifi();
-  handleCameraSync(currentTime);
-  handleWebSocket(currentTime);
-
+  
   // --- 2. รับคำสั่งจากหน้าจอทัชสกรีน ---
   executePendingAction(currentTime);
   checkTouch(currentTime);
@@ -2070,6 +2160,12 @@ void loop() {
   processSchedule(currentTime);
   processFeeder(currentTime);
   processWater(currentTime);
+
+    // --- 1. ตรวจสอบการเชื่อมต่อ ---
+  checkInternetConnection(currentTime);
+  checkStatusWifi();
+  handleCameraSync(currentTime);
+  handleWebSocket(currentTime);
 
   // 🛠️ โค้ดช่าง: เก็บไว้เช็คเปอร์เซ็นต์ RAM ที่ว่างอยู่
   // checkESP32_RAM(currentTime);

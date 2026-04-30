@@ -64,10 +64,10 @@ const char* deviceRole = "camera";
 // ==========================================
 // ⏱️ หมวดที่ 4: TIMERS & VARIABLES (ตัวแปรระบบ)
 // ==========================================
-const int captureInterval = 150;                    // ความถี่การส่งภาพ (50ms = 20 เฟรมต่อวินาที เน้นเสถียร)
+const int captureInterval = 150;                     // ส่งภาพทุก 150ms ประมาณ 6-7 FPS เน้นเสถียร
 const unsigned long FLASH_DURATION = 1000;         // เวลาเปิดไฟแฟลช (1000ms = 1 วินาที)
 const unsigned long WS_RECONNECT_INTERVAL = 5000;  // ดีเลย์รอต่อ WebSocket ใหม่ (5 วินาที)
-const unsigned long WIFI_TIMEOUT_MS = 30000;       // เวลาสูงสุดในการพยายามเชื่อม WiFi (10 วินาที)
+const unsigned long WIFI_TIMEOUT_MS = 30000;       // เวลาสูงสุดในการพยายามเชื่อม WiFi (30 วินาที)
 
 String currentSSID = "";
 String currentPASS = "";
@@ -326,7 +326,7 @@ void setup() {
   // 🌟 ปิดระบบเซนเซอร์ไฟกระชาก (Brown-out detector) เพื่อกันบอร์ดดับตอนกล้องดึงกระแสไฟ
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
-  Serial.begin(9600);    // 💡 ห้ามใช้ DEBUG_PRINT ตรงนี้ เพราะต้องเอาไว้อ่านค่า WiFi จากบอร์ดแม่จริงๆ
+  Serial.begin(115200);    // 💡 ห้ามใช้ DEBUG_PRINT ตรงนี้ เพราะต้องเอาไว้อ่านค่า WiFi จากบอร์ดแม่จริงๆ
   Serial.setTimeout(10); // ลดเวลา Timeout ป้องกันบอร์ดค้างเวลารอรับ Serial
 
   pinMode(FLASH_GPIO_NUM, OUTPUT);
