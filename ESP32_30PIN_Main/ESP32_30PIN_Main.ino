@@ -1905,12 +1905,17 @@ void executePendingAction(unsigned long now) {
         if (confirmMode == 1) {
           resetWiFi();
         } else if (confirmMode == 2) {
-          if (WiFi.status() == WL_CONNECTED) {
+          if (WiFi.status() == WL_CONNECTED && client.available()) {
             char timeStr[6];
             sprintf(timeStr, "%02d:%02d", schedules[deleteIdx].hour, schedules[deleteIdx].minute);
-            String json = "{\"type\":\"delete_schedule_from_esp\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\", \"time\":\"" + String(timeStr) + "\"}";
+
+            String json = "{\"type\":\"delete_schedule_from_esp\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\", \"time\":\"" + String(timeStr) + "\", \"slot\":" + String(deleteIdx + 1) + "}";
+
             client.send(json);
             DEBUG_PRINTLN("🗑️ Sent Delete Request to Server: " + json);
+
+            } else {
+              DEBUG_PRINTLN("⚠️ Cannot send delete schedule: WebSocket not connected");
           }
           schedules[deleteIdx].hour = 0;
           schedules[deleteIdx].minute = 0;
