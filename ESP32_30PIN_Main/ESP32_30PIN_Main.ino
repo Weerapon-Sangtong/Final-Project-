@@ -131,6 +131,10 @@ struct FeedingTime {
 HardwareSerial CamSerial(2);  
 WebsocketsClient client;
 WiFiManager wm;
+
+char pairingBuf[40] = "PET-001-8K72";
+WiFiManagerParameter custom_pairing("pairing", "Pairing Code", pairingBuf, 39);
+
 RTC_DS3231 rtc;
 Servo feedServo;
 VL53L0X tankSensor;
@@ -440,6 +444,71 @@ void resetWiFi() {
   ESP.restart();
 }
 
+void factoryReset() {
+  tft.fillScreen(TFT_RED);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(55, 60);
+  tft.println("FACTORY RESET");
+
+  tft.setTextSize(2);
+  tft.setCursor(35, 105);
+  tft.println("Clearing all data...");
+  delay(1000);
+
+  DEBUG_PRINTLN(">>> Factory Reset Started...");
+
+  // แจ้งให้กล้องรีบูท
+  CamSerial.println("REBOOT_CAM");
+  delay(500);
+  if (WiFi.status() == WL_CONNECTED && client.available()) {
+    String json = "{\"type\":\"factory_reset\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\"}";
+    client.send(json);
+    DEBUG_PRINTLN("📤 Sent Factory Reset to Server: " + json);
+    delay(300);
+  }
+  // ปิดระบบ network / websocket
+  client.close();
+
+  // ปิดอุปกรณ์ที่อาจค้าง
+  digitalWrite(PUMP_PIN, LOW);
+  feedServo.detach();
+
+  // ล้าง WiFi
+  wm.resetSettings();
+  WiFi.disconnect(true, true);
+  delay(500);
+
+  // ล้าง Pairing Code / device config
+  prefs.begin("device_cfg", false);
+  prefs.clear();
+  prefs.end();
+
+  // รีเซ็ตค่าตั้งต้น
+  limitBowlFood = 100;
+  limitBowlWater = 100;
+
+  for (int i = 0; i < 3; i++) {
+    schedules[i].hour = 0;
+    schedules[i].minute = 0;
+    schedules[i].gram = 10;
+    schedules[i].active = false;
+  }
+
+  saveSettings();
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_GREEN);
+  tft.setTextSize(2);
+  tft.setCursor(50, 90);
+  tft.println("Factory Reset OK");
+  tft.setCursor(65, 125);
+  tft.println("Restarting...");
+  delay(1500);
+
+  ESP.restart();
+}
+
 void configModeCallback(WiFiManager* myWiFiManager) {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(60, 30);
@@ -523,16 +592,7 @@ void startWifi() {
 
   loadPairingConfig();
 
-  char pairingBuf[40];
   pairingCode.toCharArray(pairingBuf, sizeof(pairingBuf));
-
-  WiFiManagerParameter custom_pairing(
-    "pairing",
-    "Pairing Code",
-    pairingBuf,
-    39
-  );
-
   wm.addParameter(&custom_pairing);
 
   wm.setAPCallback(configModeCallback);
@@ -1477,40 +1537,41 @@ void drawSetUpPage() {
   tft.fillScreen(TFT_BLACK);
 
   tft.fillRect(0, 0, 320, 40, TFT_DARKGREY);
-  tft.setTextColor(TFT_WHITE);
+  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
   tft.setTextSize(2);
   tft.setCursor(10, 10);
-  tft.print("Maintenance Mode");
+  tft.print("Set Up");
 
   if (maintenanceMode) {
     tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.setTextSize(2);
-    tft.setCursor(70, 99);
-    tft.print("(Safe to Clean)");
-
-    tft.setTextSize(3);
-    tft.setCursor(43, 50);
+    tft.setCursor(55, 50);
     tft.print("SYSTEM LOCKED");
 
-    tft.fillRect(60, 140, 200, 50, TFT_GREEN);
-    tft.setTextColor(TFT_BLACK);
-    tft.setCursor(106, 153);
+    tft.fillRect(60, 90, 200, 40, TFT_GREEN);
+    tft.drawRect(60, 90, 200, 40, TFT_WHITE);
+    tft.setTextColor(TFT_BLACK, TFT_GREEN);
+    tft.setCursor(106, 102);
     tft.print("UNLOCK");
+
   } else {
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.setTextSize(2);
-    tft.setCursor(46, 99);
-    tft.print("(Not Safe to Clean)");
-
-    tft.setTextSize(3);
-    tft.setCursor(52, 50);
+    tft.setCursor(58, 50);
     tft.print("SYSTEM READY");
 
-    tft.fillRect(60, 140, 200, 50, TFT_RED);
-    tft.setTextColor(TFT_WHITE);
-    tft.setCursor(124, 153);
+    tft.fillRect(60, 90, 200, 40, TFT_RED);
+    tft.drawRect(60, 90, 200, 40, TFT_WHITE);
+    tft.setTextColor(TFT_WHITE, TFT_RED);
+    tft.setCursor(124, 102);
     tft.print("LOCK");
   }
+
+  // ปุ่ม Factory Reset
+  tft.fillRect(60, 145, 200, 40, TFT_ORANGE);
+  tft.drawRect(60, 145, 200, 40, TFT_WHITE);
+  tft.setTextColor(TFT_BLACK, TFT_ORANGE);
+  tft.setTextSize(2);
+  tft.setCursor(83, 157);
+  tft.print("FACTORY RESET");
 
   backButton();
 }
@@ -1926,14 +1987,27 @@ void checkTouch(unsigned long now) {
         actionStartTime = now;
       }
     } else if (currentPage == 7) {
-      if (y > 200) {
-        backButtonEffect();
-        actionButton = 15;
-        actionStartTime = now;
-      } else if (x > 60 && x < 260 && y > 140 && y < 190) {
-        tft.fillRect(60, 140, 200, 50, TFT_WHITE);
-        actionButton = 70;
-        actionStartTime = now;
+        if (y > 200) {
+          backButtonEffect();
+          actionButton = 15;
+          actionStartTime = now;
+
+        } else if (x > 60 && x < 260 && y > 90 && y < 130) {
+          // LOCK / UNLOCK
+          tft.fillRect(60, 90, 200, 40, TFT_WHITE);
+          actionButton = 70;
+          actionStartTime = now;
+
+        } else if (x > 60 && x < 260 && y > 145 && y < 185) {
+            // FACTORY RESET
+            tft.fillRect(60, 145, 200, 40, TFT_WHITE);
+            tft.setTextColor(TFT_BLACK, TFT_WHITE);
+            tft.setTextSize(2);
+            tft.setCursor(83, 157);
+            tft.print("FACTORY RESET");
+
+            actionButton = 71;
+            actionStartTime = now;
       }
     }
   }
@@ -1984,6 +2058,7 @@ void executePendingAction(unsigned long now) {
       case 20:
         if (confirmMode == 1) {
           resetWiFi();
+
         } else if (confirmMode == 2) {
           if (WiFi.status() == WL_CONNECTED && client.available()) {
             char timeStr[6];
@@ -1994,20 +2069,32 @@ void executePendingAction(unsigned long now) {
             client.send(json);
             DEBUG_PRINTLN("🗑️ Sent Delete Request to Server: " + json);
 
-            } else {
-              DEBUG_PRINTLN("⚠️ Cannot send delete schedule: WebSocket not connected");
+          } else {
+            DEBUG_PRINTLN("⚠️ Cannot send delete schedule: WebSocket not connected");
           }
+
           schedules[deleteIdx].hour = 0;
           schedules[deleteIdx].minute = 0;
           schedules[deleteIdx].gram = 10;
           schedules[deleteIdx].active = false;
+
           saveSettings();
           drawCheckSetTime();
+
+        } else if (confirmMode == 3) {
+          factoryReset();
         }
         break;
       case 21:
-        if (confirmMode == 1) drawMenuPage();
-        else if (confirmMode == 2) drawCheckSetTime();
+        if (confirmMode == 1) {
+          drawMenuPage();
+
+        } else if (confirmMode == 2) {
+          drawCheckSetTime();
+
+        } else if (confirmMode == 3) {
+          drawSetUpPage();
+        }
         break;
 
       case 30:
@@ -2109,13 +2196,23 @@ void executePendingAction(unsigned long now) {
 
       case 70:
         maintenanceMode = !maintenanceMode;
+
         if (maintenanceMode) {
+          digitalWrite(PUMP_PIN, LOW);
           feedServo.detach();
-          DEBUG_PRINTLN(">>> System LOCKED by User");
+          waterState = WATER_IDLE;
+          feedState = IDLE;
+          DEBUG_PRINTLN(">>> Maintenance Mode ON");
         } else {
-          DEBUG_PRINTLN(">>> System UNLOCKED");
+          DEBUG_PRINTLN(">>> Maintenance Mode OFF");
         }
+
         drawSetUpPage();
+        break;
+
+      case 71:
+        confirmMode = 3;
+        drawConfirmPage("Factory Reset", "ALL DATA?", 3);
         break;
     }
     if (lastAction >= 40 && lastAction <= 47) {
