@@ -183,6 +183,7 @@ void checkFlashTimeout(unsigned long now) {
 void checkSerialWiFi() {
   if (Serial.available()) {
     String data = Serial.readStringUntil('\n');
+    while (Serial.available()) { Serial.read();}
     data.trim();
 
     if (data == "REBOOT_CAM") {
@@ -346,7 +347,7 @@ void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
   Serial.begin(115200);    // 💡 ห้ามใช้ DEBUG_PRINT ตรงนี้ เพราะต้องเอาไว้อ่านค่า WiFi จากบอร์ดแม่จริงๆ
-  Serial.setTimeout(10); // ลดเวลา Timeout ป้องกันบอร์ดค้างเวลารอรับ Serial
+  Serial.setTimeout(30); // ลดเวลา Timeout ป้องกันบอร์ดค้างเวลารอรับ Serial
 
   pinMode(FLASH_GPIO_NUM, OUTPUT);
   digitalWrite(FLASH_GPIO_NUM, LOW);

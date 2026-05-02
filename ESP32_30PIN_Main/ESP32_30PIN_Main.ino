@@ -894,11 +894,16 @@ void sendWifiToCam() {
 
     String dataPacket = ssid + "|" + pass + "|" + deviceId + "|" + camToken + "\n";
 
+        // 🌟 เคลียร์ของเก่าทิ้งก่อนส่ง (เผื่อสายค้าง)
+    while (CamSerial.available()) { CamSerial.read(); } 
+
+    // 🌟 ส่งครั้งแรก (เว้นระยะนานหน่อยให้กล้องตั้งตัว)
     CamSerial.print(dataPacket);
-    delay(100);
+    delay(500); 
+
+    // 🌟 ส่งย้ำอีกรอบ (เผื่อรอบแรกพลาด)
     CamSerial.print(dataPacket);
-    delay(100);
-    CamSerial.print(dataPacket);
+    delay(500);
 
     DEBUG_PRINTLN("📤 Sent WiFi + Pairing Config to CAM SSID: " + ssid);
   }
