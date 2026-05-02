@@ -36,8 +36,8 @@ WebsocketsClient client;
 // ==========================================
 const char* server_ip = "34.45.167.7";   // IP ของเซิร์ฟเวอร์
 const uint16_t server_port = 4000;       // Port สำหรับส่งข้อมูล
-const char* myToken = "ESP32-CAM-001";   // รหัสยืนยันตัวตนของกล้อง
-const char* deviceRole = "camera";
+String deviceId = "PET-001";
+String camToken = "PET-001-8K72-CAM";
 
 // ==========================================
 // 🔌 หมวดที่ 3: CAMERA PIN DEFINITIONS (ขาอุปกรณ์ของเลนส์)
@@ -185,19 +185,38 @@ void checkSerialWiFi() {
     String data = Serial.readStringUntil('\n');
     data.trim();
 
-    // 🌟 [จุดที่หายไป!] เพิ่มการดักจับคำสั่งรีบูทจากบอร์ดแม่
     if (data == "REBOOT_CAM") {
       DEBUG_PRINTLN("⚠️ Master requested reboot. Restarting CAM...");
       delay(100);
-      ESP.restart(); // สั่งให้กล้องรีบูทตัวเองตามบอร์ดแม่ทันที!
+      ESP.restart();
     }
 
-    // หั่นข้อความหน้าและหลังลูกน้ำ (,) เพื่อแยกชื่อ WiFi กับ รหัสผ่าน
-    int commaIndex = data.indexOf(',');
-    if (commaIndex > 0) {
-      String newSSID = data.substring(0, commaIndex);
-      String newPASS = data.substring(commaIndex + 1);
-      connectToWiFi(newSSID, newPASS);  
+    int p1 = data.indexOf('|');
+    int p2 = data.indexOf('|', p1 + 1);
+    int p3 = data.indexOf('|', p2 + 1);
+
+    if (p1 > 0 && p2 > p1 && p3 > p2) {
+      String newSSID = data.substring(0, p1);
+      String newPASS = data.substring(p1 + 1, p2);
+
+      deviceId = data.substring(p2 + 1, p3);
+      camToken = data.substring(p3 + 1);
+
+      DEBUG_PRINTLN("Received WiFi + Pairing Config from Main");
+
+      connectToWiFi(newSSID, newPASS);
+
+    } else {
+      // fallback เผื่อ Main ยังส่งแบบเก่า ssid,password
+      int commaIndex = data.indexOf(',');
+
+      if (commaIndex > 0) {
+        String newSSID = data.substring(0, commaIndex);
+        String newPASS = data.substring(commaIndex + 1);
+
+        DEBUG_PRINTLN("Received WiFi only from Main");
+        connectToWiFi(newSSID, newPASS);
+      }
     }
   }
 }
@@ -225,7 +244,7 @@ void processCameraStream(unsigned long now) {
       if (client.connect(server_ip, server_port, "/")) {
         client.onMessage(onMessageCallback);
 
-        client.send("{\"type\":\"register\", \"role\":\"camera\", \"token\":\"" + String(myToken) + "\"}");
+        client.send("{\"type\":\"register\", \"deviceId\":\"" + deviceId + "\", \"role\":\"camera\", \"token\":\"" + camToken + "\"}");
 
         DEBUG_PRINTLN("✅ Camera WebSocket Connected!");
       } else {

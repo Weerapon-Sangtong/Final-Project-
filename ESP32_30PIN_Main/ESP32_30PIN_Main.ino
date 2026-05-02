@@ -37,6 +37,7 @@
 #include <ESP32Servo.h>
 #include <VL53L0X.h>
 #include <HX711_ADC.h>
+#include <Preferences.h>
 
 using namespace websockets;
 
@@ -144,9 +145,15 @@ HX711_ADC LoadCell_BowlFood(HX_BowlFood_DT, HX_BowlFood_SCK);
 // 💾 หมวดที่ 6: GLOBAL VARIABLES (ตัวแปรส่วนกลาง)
 // ==========================================
 const char* websocket_server_host = "34.45.167.7";  
-const uint16_t server_port = 4000;                  
-const char* myToken = "ESP32-CAM-001";    
-const char* deviceRole = "main";          
+const uint16_t server_port = 4000;     
+
+Preferences prefs;
+
+String pairingCode = "PET-001-8K72";
+String deviceId = "PET-001";
+String mainToken = "PET-001-8K72-MAIN";
+String camToken = "PET-001-8K72-CAM";
+
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 7 * 3600;  
 const int daylightOffset_sec = 0;
@@ -453,19 +460,93 @@ void configModeCallback(WiFiManager* myWiFiManager) {
   tft.println(WiFi.softAPIP());
 }
 
+String makeDeviceIdFromPairingCode(String code) {
+  code.trim();
+
+  int lastDash = code.lastIndexOf('-');
+
+  if (lastDash > 0) {
+    return code.substring(0, lastDash);
+  }
+
+  return code;
+}
+
+void buildTokensFromPairingCode(String code) {
+  code.trim();
+
+  if (code.length() == 0) {
+    code = "PET-001-8K72";
+  }
+
+  pairingCode = code;
+  deviceId = makeDeviceIdFromPairingCode(code);
+
+  mainToken = pairingCode + "-MAIN";
+  camToken = pairingCode + "-CAM";
+}
+
+void loadPairingConfig() {
+  prefs.begin("device_cfg", true);
+
+  pairingCode = prefs.getString("pairing", "PET-001-8K72");
+
+  prefs.end();
+
+  buildTokensFromPairingCode(pairingCode);
+
+  DEBUG_PRINTLN("Pairing Code Loaded");
+  DEBUG_PRINTLN("Device ID: " + deviceId);
+}
+
+void savePairingConfig(String newPairingCode) {
+  newPairingCode.trim();
+
+  if (newPairingCode.length() == 0) {
+    return;
+  }
+
+  prefs.begin("device_cfg", false);
+  prefs.putString("pairing", newPairingCode);
+  prefs.end();
+
+  buildTokensFromPairingCode(newPairingCode);
+
+  DEBUG_PRINTLN("Pairing Code Saved");
+  DEBUG_PRINTLN("Device ID: " + deviceId);
+}
+
 void startWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(true);
 
-  wm.setAPCallback(configModeCallback);
+  loadPairingConfig();
 
-  // ให้เปิด portal แค่ 120 วิ ถ้าไม่มีคนตั้งค่า ให้เข้า offline mode
+  char pairingBuf[40];
+  pairingCode.toCharArray(pairingBuf, sizeof(pairingBuf));
+
+  WiFiManagerParameter custom_pairing(
+    "pairing",
+    "Pairing Code",
+    pairingBuf,
+    39
+  );
+
+  wm.addParameter(&custom_pairing);
+
+  wm.setAPCallback(configModeCallback);
   wm.setConfigPortalTimeout(60);
 
   bool connected = wm.autoConnect("Smart Pet Feeder");
 
   if (connected) {
+    String newPairingCode = custom_pairing.getValue();
+
+    if (newPairingCode.length() > 0) {
+      savePairingConfig(newPairingCode);
+    }
+
     DEBUG_PRINTLN("✅ WiFi Connected");
     DEBUG_PRINT("IP Address: ");
     DEBUG_PRINTLN(WiFi.localIP());
@@ -482,6 +563,7 @@ void startWifi() {
     sendWifiToCam();
 
     forceUpdateTank = true;
+
   } else {
     DEBUG_PRINTLN("⚠️ WiFi not connected. Starting OFFLINE MODE...");
 
@@ -492,12 +574,10 @@ void startWifi() {
 
     client.close();
 
-    // ปิด WiFi STA/AP ที่ WiFiManager เปิดไว้ เพื่อไม่ให้วน config portal
     WiFi.disconnect(false, false);
     WiFi.mode(WIFI_OFF);
     delay(300);
 
-    // กลับไปทำงานแบบไม่มี WiFi
     if (checkRtc) {
       syncSystemTimeFromRtc();
     }
@@ -646,7 +726,7 @@ void onMessageCallback(WebsocketsMessage message) {
         parseScheduleFromWebSocket(String(rawSchedule));
 
         if (WiFi.status() == WL_CONNECTED && client.available()) {
-          String ackJson = "{\"type\":\"ack\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\", \"msg\":\"schedule_updated\"}";
+          String ackJson = "{\"type\":\"ack\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\", \"msg\":\"schedule_updated\"}";
           client.send(ackJson);
           DEBUG_PRINTLN("📤 Sent ACK to Server: " + ackJson);
         }
@@ -723,7 +803,7 @@ void handleWebSocket(unsigned long now) {
 
       client.onMessage(onMessageCallback);
 
-      client.send("{\"type\":\"register\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\"}");
+      client.send("{\"type\":\"register\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\"}");
     } else {
       DEBUG_PRINTLN("❌ WebSocket Connect Failed");
     }
@@ -734,7 +814,7 @@ void handleWebSocket(unsigned long now) {
   if (now - lastWebSocketSend > WEBSOCKET_SEND_INTERVAL) {
     lastWebSocketSend = now;
 
-    String json = "{\"type\":\"update_sensor\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\", \"food\":" + String(tankFood) + ", \"water\":" + String(tankWater) + ", \"bowlFood\":" + String(bowlFood) + ", \"bowlWater\":" + String(bowlWater) + "}";
+    String json = "{\"type\":\"update_sensor\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\", \"food\":" + String(tankFood) + ", \"water\":" + String(tankWater) + ", \"bowlFood\":" + String(bowlFood) + ", \"bowlWater\":" + String(bowlWater) + "}";
 
     DEBUG_PRINTLN("📤 Sent Sensor: " + json);
     client.send(json);
@@ -751,7 +831,7 @@ void sendWifiToCam() {
       return;
     }
 
-    String dataPacket = ssid + "," + pass + "\n";
+    String dataPacket = ssid + "|" + pass + "|" + deviceId + "|" + camToken + "\n";
 
     CamSerial.print(dataPacket);
     delay(100);
@@ -759,7 +839,7 @@ void sendWifiToCam() {
     delay(100);
     CamSerial.print(dataPacket);
 
-    DEBUG_PRINTLN("📤 Sent WiFi to CAM SSID: " + ssid);
+    DEBUG_PRINTLN("📤 Sent WiFi + Pairing Config to CAM SSID: " + ssid);
   }
 }
 
@@ -886,7 +966,7 @@ void processFeeder(unsigned long now) {
         feedState = IDLE;
 
         if (WiFi.status() == WL_CONNECTED) {
-          String logJson = "{\"type\":\"feed_log\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\", \"amount\":" + String(currentFeedAmount) + ", \"source\":\"" + currentFeedSource + "\"}";
+          String logJson = "{\"type\":\"feed_log\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\", \"amount\":" + String(currentFeedAmount) + ", \"source\":\"" + currentFeedSource + "\"}";
           client.send(logJson);
           DEBUG_PRINTLN("📤 Sent Feed Log to Server: " + logJson);
         }
@@ -1909,7 +1989,7 @@ void executePendingAction(unsigned long now) {
             char timeStr[6];
             sprintf(timeStr, "%02d:%02d", schedules[deleteIdx].hour, schedules[deleteIdx].minute);
 
-            String json = "{\"type\":\"delete_schedule_from_esp\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\", \"time\":\"" + String(timeStr) + "\", \"slot\":" + String(deleteIdx + 1) + "}";
+            String json = "{\"type\":\"delete_schedule_from_esp\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\", \"time\":\"" + String(timeStr) + "\", \"slot\":" + String(deleteIdx + 1) + "}";
 
             client.send(json);
             DEBUG_PRINTLN("🗑️ Sent Delete Request to Server: " + json);
@@ -1986,10 +2066,10 @@ void executePendingAction(unsigned long now) {
         schedules[editIdx].active = true;
         saveSettings();
         DEBUG_PRINTF("Saved Slot %d: %02d:%02d (%ds)\n", editIdx + 1, schedules[editIdx].hour, schedules[editIdx].minute, schedules[editIdx].gram);
-        if (WiFi.status() == WL_CONNECTED) {
+        if (WiFi.status() == WL_CONNECTED && client.available()) {
           char timeStr[6];
           sprintf(timeStr, "%02d:%02d", schedules[editIdx].hour, schedules[editIdx].minute);
-          String json = "{\"type\":\"add_schedule_from_esp\", \"role\":\"main\", \"token\":\"" + String(myToken) + "\", \"time\":\"" + String(timeStr) + "\", \"duration\":" + String(schedules[editIdx].gram) + ", \"slot\":" + String(editIdx + 1) + "}";
+          String json = "{\"type\":\"add_schedule_from_esp\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\", \"time\":\"" + String(timeStr) + "\", \"duration\":" + String(schedules[editIdx].gram) + ", \"slot\":" + String(editIdx + 1) + "}";
           client.send(json);
           DEBUG_PRINTLN("📤 Synced Schedule to Server: " + json);
         }
