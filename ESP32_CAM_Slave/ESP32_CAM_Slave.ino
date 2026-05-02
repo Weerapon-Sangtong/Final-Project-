@@ -37,7 +37,7 @@ WebsocketsClient client;
 const char* server_ip = "34.45.167.7";   // IP ของเซิร์ฟเวอร์
 const uint16_t server_port = 4000;       // Port สำหรับส่งข้อมูล
 String deviceId = "PET-001";
-String camToken = "PET-001-8K72-CAM";
+String camToken = "PET-001-8K72";
 
 // ==========================================
 // 🔌 หมวดที่ 3: CAMERA PIN DEFINITIONS (ขาอุปกรณ์ของเลนส์)

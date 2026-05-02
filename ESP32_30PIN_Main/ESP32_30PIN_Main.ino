@@ -155,8 +155,8 @@ Preferences prefs;
 
 String pairingCode = "PET-001-8K72";
 String deviceId = "PET-001";
-String mainToken = "PET-001-8K72-MAIN";
-String camToken = "PET-001-8K72-CAM";
+String mainToken = "PET-001-8K72";
+String camToken = "PET-001-8K72";
 
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 7 * 3600;  
@@ -551,8 +551,9 @@ void buildTokensFromPairingCode(String code) {
   pairingCode = code;
   deviceId = makeDeviceIdFromPairingCode(code);
 
-  mainToken = pairingCode + "-MAIN";
-  camToken = pairingCode + "-CAM";
+  // ใช้ token เดียวกันทั้ง Main และ Camera
+  mainToken = pairingCode;
+  camToken = pairingCode;
 }
 
 void loadPairingConfig() {
