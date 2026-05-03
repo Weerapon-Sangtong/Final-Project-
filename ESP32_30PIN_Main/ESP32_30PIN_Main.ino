@@ -944,11 +944,11 @@ void sendWifiToCam() {
 
     // 🌟 ส่งครั้งแรก (เว้นระยะนานหน่อยให้กล้องตั้งตัว)
     CamSerial.print(dataPacket);
-    delay(150); 
+    delay(500); 
 
     // 🌟 ส่งย้ำอีกรอบ (เผื่อรอบแรกพลาด)
     CamSerial.print(dataPacket);
-    delay(150);
+    delay(500);
 
     DEBUG_PRINTLN("📤 Sent WiFi + Pairing Config to CAM SSID: " + ssid);
   }
