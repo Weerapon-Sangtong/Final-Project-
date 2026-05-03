@@ -167,7 +167,7 @@ unsigned long lastCamSync = 0;
 unsigned long startDelayNetCheck = 0;
 unsigned long startDelayWifiRetry = 0;
 bool wifiStatus = false;
-bool lastWifiStatus = false;
+int lastNetStatus = -1;  // 0 = no WiFi, 1 = WiFi only, 2 = WiFi + Server
 bool ntpStarted = false;
 
 bool maintenanceMode = false;  
@@ -186,7 +186,10 @@ int deleteIdx = 0;
 
 int limitBowlFood = 100;  
 int bowlFood = 0;         
-int tankFood = 0;         
+int tankFood = 0;       
+int lastValidTankFood = 0;
+bool tankSensorReady = false;
+  
 int manualFeedAmount = 1;
 float feedTargetWeight = 0;  
 bool petAteTrigger = false;
@@ -289,8 +292,13 @@ void syncSystemTimeFromRtc() {
 
 void vl53l0xFood() {
   tankSensor.setTimeout(100);
+
   if (tankSensor.init()) {
-    tankSensor.stopContinuous();
+    tankSensorReady = true;
+    DEBUG_PRINTLN("✅ VL53L0X Ready");
+  } else {
+    tankSensorReady = false;
+    DEBUG_PRINTLN("❌ VL53L0X Init Failed");
   }
 }
 
@@ -323,20 +331,27 @@ void updateTankLevel() {
 
   DEBUG_PRINTLN(">>> Checking Tank Level...");
 
-  tankSensor.startContinuous();
+  if (!tankSensorReady) {
+    DEBUG_PRINTLN("❌ VL53L0X not ready. Skip tank check.");
+    tankFood = lastValidTankFood;
+    return;
+  }
 
   long totalDistance = 0;
   int validReadings = 0;
 
   for (int i = 0; i < 5; i++) {
-    int distance = tankSensor.readRangeContinuousMillimeters();
+    int distance = tankSensor.readRangeSingleMillimeters();
 
     if (tankSensor.timeoutOccurred()) {
       DEBUG_PRINTLN("VL53L0X timeout!");
       break;
     }
 
-    if (distance > 10 && distance < 8000 && distance < (TANK_EMPTY + 100)) {
+    DEBUG_PRINT("VL53L0X distance = ");
+    DEBUG_PRINTLN(distance);
+
+    if (distance > 10 && distance < 1200) {
       totalDistance += distance;
       validReadings++;
     }
@@ -344,26 +359,34 @@ void updateTankLevel() {
     delay(5);
   }
 
-  tankSensor.stopContinuous();
-
   if (validReadings > 0) {
     int currentDistance = totalDistance / validReadings;
 
     static int smoothDistance = -1;
+
     if (smoothDistance == -1) {
       smoothDistance = currentDistance;
     } else {
       smoothDistance = (smoothDistance * 0.7) + (currentDistance * 0.3);
     }
 
+    DEBUG_PRINT("Raw: ");
+    DEBUG_PRINT(currentDistance);
+    DEBUG_PRINT("mm | Smooth: ");
+    DEBUG_PRINT(smoothDistance);
+    DEBUG_PRINTLN("mm");
+
     int percent = map(smoothDistance, TANK_EMPTY, TANK_FULL, 0, 100);
     tankFood = constrain(percent, 0, 100);
+    lastValidTankFood = tankFood;
 
     DEBUG_PRINT("Final Food: ");
     DEBUG_PRINT(tankFood);
     DEBUG_PRINTLN("%");
+
   } else {
-    DEBUG_PRINTLN("Error: No valid tank readings!");
+    DEBUG_PRINTLN("Error: No valid tank readings! Keep last value.");
+    tankFood = lastValidTankFood;
   }
 
   DEBUG_PRINT("updateTankLevel time = ");
@@ -597,7 +620,7 @@ void startWifi() {
   wm.addParameter(&custom_pairing);
 
   wm.setAPCallback(configModeCallback);
-  wm.setConfigPortalTimeout(60);
+  wm.setConfigPortalTimeout(120);
 
   bool connected = wm.autoConnect("Smart Pet Feeder");
 
@@ -623,13 +646,14 @@ void startWifi() {
     delay(1000);
     sendWifiToCam();
 
+    delay(500);
     forceUpdateTank = true;
 
   } else {
     DEBUG_PRINTLN("⚠️ WiFi not connected. Starting OFFLINE MODE...");
 
     wifiStatus = false;
-    lastWifiStatus = true;
+    lastNetStatus = -1;
     ntpStarted = false;
     rtcBoot = false;
 
@@ -658,25 +682,29 @@ void syncRtcFromNtp() {
 
 void checkInternetConnection(unsigned long currentTime) {
   if (WiFi.status() == WL_CONNECTED) {
+
+    // ให้ไฟสถานะขึ้นเขียวทันที ไม่ต้องรอ 60 วินาที
+    wifiStatus = true;
+
     if (!ntpStarted) {
       configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
       ntpStarted = true;
     }
 
+    // ส่วนนี้ยังให้ทำเป็นรอบ ๆ ได้ เพื่อไม่ให้ sync RTC บ่อยเกินไป
     if (currentTime - startDelayNetCheck >= END_DELAY_NET_CHECK) {
       startDelayNetCheck = currentTime;
-      wifiStatus = true;
 
-      if (wifiStatus && checkRtc && !rtcBoot) {
+      if (checkRtc && !rtcBoot) {
         syncRtcFromNtp();
       }
     }
+
   } else {
     wifiStatus = false;
     rtcBoot = false;
     ntpStarted = false;
 
-    // ถ้าปิด WiFi ไปแล้ว แปลว่าอยู่ offline mode ไม่ต้อง WiFi.begin()
     if (WiFi.getMode() == WIFI_OFF) {
       return;
     }
@@ -693,24 +721,41 @@ void checkInternetConnection(unsigned long currentTime) {
 
 void checkStatusWifi() {
   if (currentPage != 0) return;
-  if (wifiStatus != lastWifiStatus) {
-    int x = 300;
-    int y = 18;
-    if (wifiStatus) {
-      tft.fillCircle(x, y, 3, TFT_GREEN);
-      tft.drawCircle(x, y, 8, TFT_GREEN);
-      tft.drawCircle(x, y, 9, TFT_GREEN);
-      tft.drawCircle(x, y, 14, TFT_GREEN);
-      tft.drawCircle(x, y, 15, TFT_GREEN);
-    } else {
-      tft.fillCircle(x, y, 3, TFT_RED);
-      tft.drawCircle(x, y, 8, TFT_RED);
-      tft.drawCircle(x, y, 9, TFT_RED);
-      tft.drawCircle(x, y, 14, TFT_RED);
-      tft.drawCircle(x, y, 15, TFT_RED);
-    }
-    lastWifiStatus = wifiStatus;
+
+  int netStatus = 0;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    netStatus = 0;   // แดง = ไม่มี WiFi
+  } else if (client.available()) {
+    netStatus = 2;   // เขียว = WiFi + Server/WebSocket พร้อม
+  } else {
+    netStatus = 1;   // เหลือง = WiFi ต่อได้ แต่ server ยังไม่ต่อ
   }
+
+  if (netStatus == lastNetStatus) return;
+
+  int x = 300;
+  int y = 18;
+
+  uint16_t color;
+
+  if (netStatus == 0) {
+    color = TFT_RED;
+  } else if (netStatus == 1) {
+    color = TFT_YELLOW;
+  } else {
+    color = TFT_GREEN;
+  }
+
+  tft.fillRect(x - 18, y - 18, 36, 36, TFT_NAVY);
+
+  tft.fillCircle(x, y, 3, color);
+  tft.drawCircle(x, y, 8, color);
+  tft.drawCircle(x, y, 9, color);
+  tft.drawCircle(x, y, 14, color);
+  tft.drawCircle(x, y, 15, color);
+
+  lastNetStatus = netStatus;
 }
 
 void parseScheduleFromWebSocket(String raw) {
@@ -899,11 +944,11 @@ void sendWifiToCam() {
 
     // 🌟 ส่งครั้งแรก (เว้นระยะนานหน่อยให้กล้องตั้งตัว)
     CamSerial.print(dataPacket);
-    delay(500); 
+    delay(150); 
 
     // 🌟 ส่งย้ำอีกรอบ (เผื่อรอบแรกพลาด)
     CamSerial.print(dataPacket);
-    delay(500);
+    delay(150);
 
     DEBUG_PRINTLN("📤 Sent WiFi + Pairing Config to CAM SSID: " + ssid);
   }
@@ -1217,7 +1262,7 @@ void drawHomePage() {
   tft.print("MENU");
 
   lastTimeStr = "";
-  lastWifiStatus = !wifiStatus;
+  lastNetStatus = -1;
   forceUpdateTank = true;
 }
 
@@ -2246,6 +2291,7 @@ void setup() {
     delayMicroseconds(10);
   }
   Wire.begin(21, 22);
+  Wire.setTimeOut(100);
 
   // 2. ปลุกตาชั่ง (HX711) ให้ตื่นจากการ Sleep (ดึง SCK กลับมาเป็น LOW)
   pinMode(HX_BowlWater_SCK, OUTPUT);
@@ -2317,7 +2363,7 @@ void setup() {
   vl53l0xFood();
 
   updateTankLevel();
-  forceUpdateTank = true;
+  forceUpdateTank = false;
 
   client.onMessage(onMessageCallback);
 
