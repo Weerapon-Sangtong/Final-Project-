@@ -6,7 +6,7 @@
 // 🔴 หมวดที่ 0: MASTER DEBUG SWITCH (สวิตช์เปิด/ปิด ข้อความหลังบ้าน)
 // ==========================================
 // 💡 เปลี่ยนเป็น 1 = เปิดข้อความ Debug, เปลี่ยนเป็น 0 = ปิดข้อความทั้งหมดเพื่อประหยัด RAM
-#define DEBUG_MODE 1
+#define DEBUG_MODE 0
 
 #if DEBUG_MODE == 1
 #define DEBUG_PRINT(x) Serial.print(x)
@@ -222,8 +222,9 @@ bool postWifiTankRequested = false;
 unsigned long wifiConnectedTime = 0;
 
 // ============================================================================
-// ======================= 🔧 หมวดที่ 7: UTILITIES & EEPROM =====================
+// ======================= 🔧 หมวดที่ 7: EEPROM / PREFERENCES / CONFIG =======================
 // ============================================================================
+
 bool hasInternet() {
   return WiFi.status() == WL_CONNECTED;
 }
@@ -266,9 +267,67 @@ void loadSettings() {
   DEBUG_PRINTLN(">>> Settings Loaded & Filtered");
 }
 
+String makeDeviceIdFromPairingCode(String code) {
+  code.trim();
+
+  int lastDash = code.lastIndexOf('-');
+
+  if (lastDash > 0) {
+    return code.substring(0, lastDash);
+  }
+
+  return code;
+}
+
+void buildTokensFromPairingCode(String code) {
+  code.trim();
+
+  if (code.length() == 0) {
+    code = "PET-001-8K72";
+  }
+
+  pairingCode = code;
+  deviceId = makeDeviceIdFromPairingCode(code);
+
+  // ใช้ token เดียวกันทั้ง Main และ Camera
+  mainToken = pairingCode;
+  camToken = pairingCode;
+}
+
+void loadPairingConfig() {
+  prefs.begin("device_cfg", true);
+
+  pairingCode = prefs.getString("pairing", "PET-001-8K72");
+
+  prefs.end();
+
+  buildTokensFromPairingCode(pairingCode);
+
+  DEBUG_PRINTLN("Pairing Code Loaded");
+  DEBUG_PRINTLN("Device ID: " + deviceId);
+}
+
+void savePairingConfig(String newPairingCode) {
+  newPairingCode.trim();
+
+  if (newPairingCode.length() == 0) {
+    return;
+  }
+
+  prefs.begin("device_cfg", false);
+  prefs.putString("pairing", newPairingCode);
+  prefs.end();
+
+  buildTokensFromPairingCode(newPairingCode);
+
+  DEBUG_PRINTLN("Pairing Code Saved");
+  DEBUG_PRINTLN("Device ID: " + deviceId);
+}
+
 // ============================================================================
-// =================== ⚖️ หมวดที่ 8: HARDWARE & SENSORS CONFIG ==================
+// ======================= ⏰ หมวดที่ 8: RTC / TIME =======================
 // ============================================================================
+
 void rtcStart() {
   if (!rtc.begin()) {
     checkRtc = false;
@@ -299,6 +358,19 @@ void syncSystemTimeFromRtc() {
   DEBUG_PRINTLN(">>> System Time Synced from RTC (No WiFi needed)");
 }
 
+void syncRtcFromNtp() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                        timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
+    rtcBoot = true;
+  }
+}
+
+// ============================================================================
+// ======================= ⚙️ หมวดที่ 9: HARDWARE INIT =======================
+// ============================================================================
+
 void vl53l0xFood() {
   tankSensor.setTimeout(100);
 
@@ -314,7 +386,7 @@ void vl53l0xFood() {
 void loadCellBowlFood() {
   LoadCell_BowlFood.begin();
   LoadCell_BowlFood.start(2000, false);
-  LoadCell_BowlFood.setTareOffset(8921119);
+  LoadCell_BowlFood.setTareOffset(8922099);
   LoadCell_BowlFood.setCalFactor(420.0);
   LoadCell_BowlFood.setSamplesInUse(32);
 }
@@ -322,7 +394,7 @@ void loadCellBowlFood() {
 void loadCellBowlWater() {
   LoadCell_BowlWater.begin();
   LoadCell_BowlWater.start(2000, false);
-  LoadCell_BowlWater.setTareOffset(8935986);
+  LoadCell_BowlWater.setTareOffset(8937161);
   LoadCell_BowlWater.setCalFactor(420.0);
   LoadCell_BowlWater.setSamplesInUse(32);
 }
@@ -330,10 +402,14 @@ void loadCellBowlWater() {
 void loadCellTankWater() {
   LoadCell_TankWater.begin();
   LoadCell_TankWater.start(2000, false);
-  LoadCell_TankWater.setTareOffset(8045716);
+  LoadCell_TankWater.setTareOffset(7960153);
   LoadCell_TankWater.setCalFactor(420.0);
   LoadCell_TankWater.setSamplesInUse(32);
 }
+
+// ============================================================================
+// ======================= 📡 หมวดที่ 10: SENSOR READING / SENSOR WORK =======================
+// ============================================================================
 
 void updateTankLevel() {
   unsigned long start = millis();
@@ -437,7 +513,7 @@ void loadCellWaterTankWork() {
 }
 
 // ============================================================================
-// ==================== 🌐 หมวดที่ 9: NETWORK & WEBSOCKET =======================
+// ======================= 🌐 หมวดที่ 11: WIFI MANAGER / RESET / FACTORY RESET =======================
 // ============================================================================
 
 void resetWiFi() {
@@ -450,7 +526,7 @@ void resetWiFi() {
 
   DEBUG_PRINTLN(">>> Graceful Shutdown Started...");
 
-  // 🌟 [จุดสำคัญ!] สั่งหารให้บอร์ดกล้องรีบูทตามไปพร้อมกัน จะได้ไม่ค้างคาเน็ตตัวเก่า!
+  // 🌟 [จุดสำคัญ!] สั่งให้บอร์ดกล้องรีบูทตามไปพร้อมกัน เพื่อไม่ให้ค้างกับ WiFi ตัวเก่า
   CamSerial.println("REBOOT_CAM");
   delay(500);
 
@@ -561,63 +637,6 @@ void configModeCallback(WiFiManager* myWiFiManager) {
   tft.println(WiFi.softAPIP());
 }
 
-String makeDeviceIdFromPairingCode(String code) {
-  code.trim();
-
-  int lastDash = code.lastIndexOf('-');
-
-  if (lastDash > 0) {
-    return code.substring(0, lastDash);
-  }
-
-  return code;
-}
-
-void buildTokensFromPairingCode(String code) {
-  code.trim();
-
-  if (code.length() == 0) {
-    code = "PET-001-8K72";
-  }
-
-  pairingCode = code;
-  deviceId = makeDeviceIdFromPairingCode(code);
-
-  // ใช้ token เดียวกันทั้ง Main และ Camera
-  mainToken = pairingCode;
-  camToken = pairingCode;
-}
-
-void loadPairingConfig() {
-  prefs.begin("device_cfg", true);
-
-  pairingCode = prefs.getString("pairing", "PET-001-8K72");
-
-  prefs.end();
-
-  buildTokensFromPairingCode(pairingCode);
-
-  DEBUG_PRINTLN("Pairing Code Loaded");
-  DEBUG_PRINTLN("Device ID: " + deviceId);
-}
-
-void savePairingConfig(String newPairingCode) {
-  newPairingCode.trim();
-
-  if (newPairingCode.length() == 0) {
-    return;
-  }
-
-  prefs.begin("device_cfg", false);
-  prefs.putString("pairing", newPairingCode);
-  prefs.end();
-
-  buildTokensFromPairingCode(newPairingCode);
-
-  DEBUG_PRINTLN("Pairing Code Saved");
-  DEBUG_PRINTLN("Device ID: " + deviceId);
-}
-
 void startWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
@@ -679,19 +698,11 @@ void startWifi() {
   }
 }
 
-void syncRtcFromNtp() {
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-                        timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
-    rtcBoot = true;
-  }
-}
-
 void checkInternetConnection(unsigned long currentTime) {
   if (WiFi.status() == WL_CONNECTED) {
 
-    // ให้ไฟสถานะขึ้นเขียวทันที ไม่ต้องรอ 60 วินาที
+    // อัปเดตสถานะ WiFi ภายในระบบทันที ไม่ต้องรอ 60 วินาที
+    // หมายเหตุ: ไอคอนสีเขียวจริงจะขึ้นเมื่อ WebSocket/server พร้อมใน checkStatusWifi()
     wifiStatus = true;
 
     if (!ntpStarted) {
@@ -699,7 +710,7 @@ void checkInternetConnection(unsigned long currentTime) {
       ntpStarted = true;
     }
 
-    // ส่วนนี้ยังให้ทำเป็นรอบ ๆ ได้ เพื่อไม่ให้ sync RTC บ่อยเกินไป
+    // sync RTC จาก NTP เป็นรอบ ๆ เพื่อไม่ให้ทำงานถี่เกินไป
     if (currentTime - startDelayNetCheck >= END_DELAY_NET_CHECK) {
       startDelayNetCheck = currentTime;
 
@@ -765,6 +776,10 @@ void checkStatusWifi() {
 
   lastNetStatus = netStatus;
 }
+
+// ============================================================================
+// ======================= 🔌 หมวดที่ 12: WEBSOCKET / SERVER MESSAGE =======================
+// ============================================================================
 
 void parseScheduleFromWebSocket(String raw) {
   for (int i = 0; i < 3; i++) {
@@ -935,6 +950,10 @@ void handleWebSocket(unsigned long now) {
   }
 }
 
+// ============================================================================
+// ======================= 📷 หมวดที่ 13: ESP32-CAM SERIAL SYNC =======================
+// ============================================================================
+
 void sendWifiToCam() {
   if (WiFi.status() == WL_CONNECTED) {
     String ssid = wm.getWiFiSSID(true);
@@ -1010,7 +1029,7 @@ void handleCameraSync(unsigned long now) {
 }
 
 // ============================================================================
-// ======================= 🧠 หมวดที่ 10: CORE LOGIC & PROCESS ==================
+// ======================= 🧠 หมวดที่ 14: SYSTEM DEBUG / RAM CHECK =======================
 // ============================================================================
 
 void checkESP32_RAM(unsigned long now) {
@@ -1027,6 +1046,10 @@ void checkESP32_RAM(unsigned long now) {
                  freeRam, ramPercent, ESP.getMinFreeHeap());
   }
 }
+
+// ============================================================================
+// ======================= 🍽️ หมวดที่ 15: FOOD FEEDING LOGIC =======================
+// ============================================================================
 
 void startFeeding(int value, FeedMode mode, unsigned long now) {
   if (maintenanceMode || tankFood <= 0) {
@@ -1101,7 +1124,7 @@ void processFeeder(unsigned long now) {
       if (currentWeight >= feedTargetWeight) {
         if (targetReachedTime == 0) {
           targetReachedTime = realNow;
-        } else if (realNow - targetReachedTime > 1000) {  
+        } else if (realNow - targetReachedTime > 300) {  
           DEBUG_PRINTLN(">>> Target Reached and Stable!");
           feedServo.write(SPEED_STOP);
           stopTimer = realNow;
@@ -1129,6 +1152,10 @@ void processFeeder(unsigned long now) {
       break;
   }
 }
+
+// ============================================================================
+// ======================= 💧 หมวดที่ 16: WATER SYSTEM LOGIC =======================
+// ============================================================================
 
 void processWater(unsigned long now) {
   if (maintenanceMode || tankWater <= 0) {
@@ -1206,6 +1233,10 @@ void processWater(unsigned long now) {
   }
 }
 
+// ============================================================================
+// ======================= 🕒 หมวดที่ 17: SCHEDULE LOGIC =======================
+// ============================================================================
+
 void processSchedule(unsigned long now) {
   static unsigned long lastCheckTime = 0;
   if (now - lastCheckTime < DELAY_SCHEDUIE) return;
@@ -1245,10 +1276,10 @@ void processSchedule(unsigned long now) {
   }
 }
 
+// ============================================================================
+// ======================= 🎨 หมวดที่ 18: UI DRAWING =======================
+// ============================================================================
 
-// ============================================================================
-// ======================= 🎨 หมวดที่ 11: UI & DISPLAY GRAPHICS ===============
-// ============================================================================
 void drawHomePage() {
   currentPage = 0;
   tft.fillScreen(TFT_BLACK);
@@ -1632,31 +1663,31 @@ void drawSetUpPage() {
   tft.fillScreen(TFT_BLACK);
 
   tft.fillRect(0, 0, 320, 40, TFT_DARKGREY);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  tft.setTextColor(TFT_BLACK, TFT_DARKGREY);
   tft.setTextSize(2);
   tft.setCursor(10, 10);
   tft.print("Set Up");
 
   if (maintenanceMode) {
     tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.setCursor(55, 50);
+    tft.setCursor(82, 50);  // จัดให้อยู่กึ่งกลางจอ
     tft.print("SYSTEM LOCKED");
 
     tft.fillRect(60, 90, 200, 40, TFT_GREEN);
     tft.drawRect(60, 90, 200, 40, TFT_WHITE);
     tft.setTextColor(TFT_BLACK, TFT_GREEN);
-    tft.setCursor(106, 102);
+    tft.setCursor(124, 102);  // จัดให้อยู่กึ่งกลางกรอบปุ่ม
     tft.print("UNLOCK");
 
   } else {
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.setCursor(58, 50);
+    tft.setCursor(88, 50);  // จัดให้อยู่กึ่งกลางจอ
     tft.print("SYSTEM READY");
 
     tft.fillRect(60, 90, 200, 40, TFT_RED);
     tft.drawRect(60, 90, 200, 40, TFT_WHITE);
     tft.setTextColor(TFT_WHITE, TFT_RED);
-    tft.setCursor(124, 102);
+    tft.setCursor(136, 102);  // จัดให้อยู่กึ่งกลางกรอบปุ่ม
     tft.print("LOCK");
   }
 
@@ -1731,7 +1762,6 @@ void restoreLimitButton(int btnCode) {
   tft.print(sym);
 }
 
-// 💡 รีเฟรชเฉพาะบางจุดของจอ เพื่อไม่ให้ภาพรวมกระพริบ
 void updateHomeDynamic(unsigned long now) {
   if (currentPage != 0) return;
   if (now - startDelayScreen >= END_DELAY_SCREEN) {
@@ -1859,10 +1889,10 @@ void setTimeEffectButton(int action) {
   }
 }
 
+// ============================================================================
+// ======================= 🖱️ หมวดที่ 19: TOUCH HANDLING =======================
+// ============================================================================
 
-// ============================================================================
-// ======================= 🖱️ หมวดที่ 12: TOUCH HANDLING ========================
-// ============================================================================
 void checkTouch(unsigned long now) {
   if (actionButton != 0) return;
   if (ts.touched()) {
@@ -2108,6 +2138,10 @@ void checkTouch(unsigned long now) {
   }
 }
 
+// ============================================================================
+// ======================= ⚡ หมวดที่ 20: ACTION EXECUTION =======================
+// ============================================================================
+
 void executePendingAction(unsigned long now) {
   if (actionButton == 0) return;
   unsigned long waitTime = resetDelay;
@@ -2319,12 +2353,13 @@ void executePendingAction(unsigned long now) {
 }
 
 // ============================================================================
-// ======================= 🎬 หมวดที่ 13: MAIN EXECUTION ========================
+// ======================= 🎬 หมวดที่ 21: SETUP / LOOP =======================
 // ============================================================================
+
 void setup() {
   Serial.begin(115200);
 
-  // 🌟🌟🌟 THE MAGIC FIX V2 (Wake up Hardware) 🌟🌟🌟
+  // 🌟🌟🌟 Hardware Wake-up Fix V2 🌟🌟🌟
   // 1. เคลียร์สาย I2C (เลเซอร์ VL53L0X) ให้หลุดจากอาการค้าง
   pinMode(21, INPUT_PULLUP);  // SDA ปล่อยเป็น Input ชั่วคราวไม่ให้ชนกับเซนเซอร์
   pinMode(22, OUTPUT);        // SCL ขานาฬิกา
@@ -2385,22 +2420,21 @@ void setup() {
 
   startWifi();
 
-  // เตรียมระบบรอรับโค้ดลอยฟ้า (OTA)
-  // เตรียมระบบรอรับโค้ดลอยฟ้า (OTA)
+  // เตรียมระบบ OTA สำหรับอัปโหลดโค้ดผ่าน WiFi
   ArduinoOTA.setHostname("Smart-Pet-ESP32-30PIN");
   ArduinoOTA.setPassword("1234");
   ArduinoOTA.onStart([]() {
     DEBUG_PRINTLN("\n>>> Start OTA Update... Stopping all hardware!");
-    // ตัดไฟมอเตอร์และปั๊มน้ำ ป้องกันอุปกรณ์ทำงานค้างตอนอัปเดต
+    // หยุดปั๊มน้ำและปล่อย Servo ป้องกันอุปกรณ์ทำงานค้างตอนอัปเดต
     digitalWrite(PUMP_PIN, LOW);
     feedServo.detach();
-    client.close();  // ปิดการสตรีมมิ่ง WebSocket เพื่อคืน RAM
+    client.close();  // ปิด WebSocket เพื่อคืน RAM
   });
   ArduinoOTA.begin();
   
   drawHomePage();
 
-  // ตั้งค่าเซนเซอร์
+  // ตั้งค่า Load Cell
   loadCellBowlFood();
   loadCellBowlWater();
   loadCellTankWater();
@@ -2413,33 +2447,38 @@ void setup() {
 
   // 🛠️ โค้ดช่าง: เก็บไว้ใช้วัดค่า Tare Offset ถาดน้ำหนักเมื่อเปลี่ยนชามใหม่
   // DEBUG_PRINTLN("=== TARE OFFSETS ===");
+  // DEBUG_PRINT("BowlFood: ");
   // DEBUG_PRINTLN(LoadCell_BowlFood.getTareOffset());
+  // DEBUG_PRINT("BowlWater: ");
   // DEBUG_PRINTLN(LoadCell_BowlWater.getTareOffset());
+  // DEBUG_PRINT("TankWater: ");
   // DEBUG_PRINTLN(LoadCell_TankWater.getTareOffset());
 }
 
 void loop() {
+  // --- 1. OTA ---
   ArduinoOTA.handle();  // คอยเช็คว่ามีการกดอัปโหลด OTA เข้ามาไหม
 
-  unsigned long currentTime = millis();  // 💡 ใช้เวลาตรงนี้เป็นฐานให้ทุกระบบทำงานโดยไม่อ้างอิง delay()
-  
-  // --- 2. รับคำสั่งจากหน้าจอทัชสกรีน ---
+  // --- 2. เวลากลางของระบบ ---
+  unsigned long currentTime = millis();  // ใช้เป็นเวลาฐานสำหรับระบบที่ทำงานแบบไม่บล็อกด้วย millis()
+
+  // --- 3. รับคำสั่งจากหน้าจอทัชสกรีน / อัปเดตหน้าจอ ---
   executePendingAction(currentTime);
   checkTouch(currentTime);
-  updateHomeDynamic(currentTime);  // 💡 อัปเดตเฉพาะตัวหนังสือบนจอเพื่อไม่ให้กระพริบ
+  updateHomeDynamic(currentTime);  // อัปเดตเฉพาะตัวหนังสือบนจอเพื่อไม่ให้กระพริบ
 
-  // --- 3. อ่านค่าเซนเซอร์แบบ Real-time ---
+  // --- 4. อ่านค่าเซนเซอร์แบบต่อเนื่อง ---
   loadCellBowlFoodWork(currentTime);
   vl53l0xFoodWork(currentTime);
   loadCellWaterBowlWork();
   loadCellWaterTankWork();
 
-  // --- 4. สมองกลประมวลผลการทำงาน ---
+  // --- 5. ประมวลผลตารางเวลา / ระบบให้อาหาร / ระบบน้ำ ---
   processSchedule(currentTime);
   processFeeder(currentTime);
   processWater(currentTime);
 
-    // --- 1. ตรวจสอบการเชื่อมต่อ ---
+  // --- 6. จัดการ WiFi / Server / WebSocket / ESP32-CAM ---
   checkInternetConnection(currentTime);
   checkStatusWifi();
   processPostWifiActions(currentTime);
@@ -2447,6 +2486,6 @@ void loop() {
   processCamSerialSend(currentTime);
   handleWebSocket(currentTime);
 
-  // 🛠️ โค้ดช่าง: เก็บไว้เช็คเปอร์เซ็นต์ RAM ที่ว่างอยู่
+  // --- 7. Debug ระบบ ---
   // checkESP32_RAM(currentTime);
 }
