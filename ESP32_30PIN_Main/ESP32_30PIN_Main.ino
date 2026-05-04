@@ -179,6 +179,11 @@ int currentPage = 0;
 bool checkRtc = false;
 bool rtcBoot = false;
 
+bool camSendActive = false;
+int camSendCount = 0;
+unsigned long lastCamSendTime = 0;
+String camPendingPacket = "";
+
 FeedingTime schedules[3];  
 int editIdx = 0;           
 int confirmMode = 0;       
@@ -211,6 +216,10 @@ WaterState waterState = WATER_IDLE;
 unsigned long pumpTimer = 0;
 unsigned long waterWaitTimer = 0;
 
+bool postWifiActionPending = false;
+bool postWifiCamSent = false;
+bool postWifiTankRequested = false;
+unsigned long wifiConnectedTime = 0;
 
 // ============================================================================
 // ======================= 🔧 หมวดที่ 7: UTILITIES & EEPROM =====================
@@ -636,18 +645,17 @@ void startWifi() {
     DEBUG_PRINTLN(WiFi.localIP());
 
     client.close();
-    delay(500);
+    delay(100);
 
     wifiStatus = true;
 
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     ntpStarted = true;
 
-    delay(1000);
-    sendWifiToCam();
-
-    delay(500);
-    forceUpdateTank = true;
+    wifiConnectedTime = millis();
+    postWifiActionPending = true;
+    postWifiCamSent = false;
+    postWifiTankRequested = false;
 
   } else {
     DEBUG_PRINTLN("⚠️ WiFi not connected. Starting OFFLINE MODE...");
@@ -937,20 +945,56 @@ void sendWifiToCam() {
       return;
     }
 
-    String dataPacket = ssid + "|" + pass + "|" + deviceId + "|" + camToken + "\n";
+    camPendingPacket = ssid + "|" + pass + "|" + deviceId + "|" + camToken + "\n";
 
-        // 🌟 เคลียร์ของเก่าทิ้งก่อนส่ง (เผื่อสายค้าง)
-    while (CamSerial.available()) { CamSerial.read(); } 
+    while (CamSerial.available()) {
+      CamSerial.read();
+    }
 
-    // 🌟 ส่งครั้งแรก (เว้นระยะนานหน่อยให้กล้องตั้งตัว)
-    CamSerial.print(dataPacket);
-    delay(500); 
+    camSendActive = true;
+    camSendCount = 0;
+    lastCamSendTime = 0;
 
-    // 🌟 ส่งย้ำอีกรอบ (เผื่อรอบแรกพลาด)
-    CamSerial.print(dataPacket);
-    delay(500);
+    DEBUG_PRINTLN("📤 Start sending WiFi + Pairing Config to CAM SSID: " + ssid);
+  }
+}
 
-    DEBUG_PRINTLN("📤 Sent WiFi + Pairing Config to CAM SSID: " + ssid);
+void processPostWifiActions(unsigned long now) {
+  if (!postWifiActionPending) return;
+
+  // หลัง WiFi connected 1 วินาที ค่อยส่งข้อมูลให้ CAM
+  if (!postWifiCamSent && now - wifiConnectedTime >= 1000) {
+    sendWifiToCam();
+    postWifiCamSent = true;
+  }
+
+  // หลัง WiFi connected 1.5 วินาที ค่อยให้อัปเดตถังอาหาร
+  if (!postWifiTankRequested && now - wifiConnectedTime >= 1500) {
+    forceUpdateTank = true;
+    postWifiTankRequested = true;
+  }
+
+  if (postWifiCamSent && postWifiTankRequested) {
+    postWifiActionPending = false;
+  }
+}
+
+void processCamSerialSend(unsigned long now) {
+  if (!camSendActive) return;
+
+  if (lastCamSendTime == 0 || now - lastCamSendTime >= 200) {
+    lastCamSendTime = now;
+
+    CamSerial.print(camPendingPacket);
+    camSendCount++;
+
+    DEBUG_PRINT("📤 CAM config packet sent round ");
+    DEBUG_PRINTLN(camSendCount);
+
+    if (camSendCount >= 2) {
+      camSendActive = false;
+      DEBUG_PRINTLN("✅ Finished sending CAM config");
+    }
   }
 }
 
@@ -2398,7 +2442,9 @@ void loop() {
     // --- 1. ตรวจสอบการเชื่อมต่อ ---
   checkInternetConnection(currentTime);
   checkStatusWifi();
+  processPostWifiActions(currentTime);
   handleCameraSync(currentTime);
+  processCamSerialSend(currentTime);
   handleWebSocket(currentTime);
 
   // 🛠️ โค้ดช่าง: เก็บไว้เช็คเปอร์เซ็นต์ RAM ที่ว่างอยู่
