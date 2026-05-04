@@ -44,45 +44,48 @@ using namespace websockets;
 // ==========================================
 // 🔌 หมวดที่ 2: PIN DEFINITIONS (กำหนดขาอุปกรณ์)
 // ==========================================
-#define SERVO_PIN 13  
-#define PUMP_PIN 12   
+#define SERVO_PIN 13
+#define PUMP_PIN 12
 
-#define HX_BowlWater_DT 25  
+#define HX_BowlWater_DT 25
 #define HX_BowlWater_SCK 26
-#define HX_TankWater_DT 27  
+#define HX_TankWater_DT 27
 #define HX_TankWater_SCK 14
-#define HX_BowlFood_DT 32  
+#define HX_BowlFood_DT 32
 #define HX_BowlFood_SCK 33
 
 // ==========================================
 // ⚙️ หมวดที่ 3: CONSTANTS & SETTINGS (ตั้งค่าระบบ)
 // ==========================================
 const int EEPROM_SIZE = 512;
-const int ADDR_LIMIT_FOOD = 0;    
-const int ADDR_LIMIT_WATER = 10;  
-const int ADDR_SCHEDULES = 20;    
+const int ADDR_LIMIT_FOOD = 0;
+const int ADDR_LIMIT_WATER = 10;
+const int ADDR_SCHEDULES = 20;
 
-const int SPEED_FWD = 180;                    
-const int SPEED_STOP = 90;                    
-const unsigned long FEED_TIMEOUT_MS = 40000;  
-const unsigned long SERVO_STOP_DELAY = 100;   
+const int SPEED_FWD = 180;
+const int SPEED_STOP = 90;
+const unsigned long FEED_TIMEOUT_MS = 20000;
+const unsigned long SERVO_STOP_DELAY = 100;
 
-const unsigned long WATER_REFILL_DELAY_MS = 60000;  
-const int WATER_DETECT_GAP = 50;                    
-const unsigned long WATER_TIMEOUT_MS = 40000;       
+const unsigned long WATER_REFILL_DELAY_MS = 60000;
+const int WATER_DETECT_GAP = 50;
+const unsigned long WATER_TIMEOUT_MS = 20000;
 
-const int TANK_EMPTY = 450;  
-const int TANK_FULL = 50;    
+const int FOOD_PROGRESS_GAP = 5;   // ถ้าอาหารเพิ่มเกิน 5g ถือว่ามีความคืบหน้า
+const int WATER_PROGRESS_GAP = 10;  // ถ้าน้ำเพิ่มเกิน 10ml ถือว่ามีความคืบหน้า
 
-const unsigned long TANK_CHECK_INTERVAL_MS = 15000;    
-const unsigned long CAM_SYNC_INTERVAL = 60000;         
-const unsigned long DELAY_SCHEDUIE = 1000;             
-const unsigned long WEBSOCKET_SEND_INTERVAL = 3000;    
-const unsigned long WEBSOCKET_RETRY_INTERVAL = 30000;  
-const unsigned long END_DELAY_NET_CHECK = 60000;
+const int TANK_EMPTY = 450;
+const int TANK_FULL = 50;
+
+const unsigned long TANK_CHECK_INTERVAL_MS = 15000;
+const unsigned long CAM_SYNC_INTERVAL = 60000;
+const unsigned long DELAY_SCHEDUIE = 1000;
+const unsigned long WEBSOCKET_SEND_INTERVAL = 3000;
+const unsigned long WEBSOCKET_RETRY_INTERVAL = 30000;
+const unsigned long END_DELAY_NET_CHECK = 300000;
 const unsigned long END_DELAY_WIFI_RETRY = 30000;
 const unsigned long END_DELAY_SCREEN = 1000;
-const unsigned long resetDelay = 300;  
+const unsigned long resetDelay = 300;
 
 const int X_MIN = 450;
 const int X_MAX = 3900;
@@ -94,15 +97,15 @@ const uint16_t TFT_BABYBLUE = 0xB6FF;
 const uint16_t TFT_CREAMYELLOW = 0xFFF2;
 const uint16_t TFT_LIGHTGREEN = 0x9772;
 
-String currentFeedSource = "";  
-int currentFeedAmount = 0;      
+String currentFeedSource = "";
+int currentFeedAmount = 0;
 
 // ==========================================
 // 📦 หมวดที่ 4: DATA TYPES (โครงสร้างสถานะต่างๆ)
 // ==========================================
 enum FeedMode {
-  FILL_UP_TO,  
-  ADD_MORE     
+  FILL_UP_TO,
+  ADD_MORE
 };
 
 enum FeederState {
@@ -119,27 +122,28 @@ enum WaterState {
 };
 
 struct FeedingTime {
-  int hour = 0;         
-  int minute = 0;       
-  int gram = 10;        
-  bool active = false;  
+  int hour = 0;
+  int minute = 0;
+  int gram = 10;
+  bool active = false;
 };
 
 // ==========================================
 // 🛠️ หมวดที่ 5: OBJECT INSTANTIATIONS (สร้างอ็อบเจกต์)
 // ==========================================
-HardwareSerial CamSerial(2);  
+HardwareSerial CamSerial(2);
 WebsocketsClient client;
 WiFiManager wm;
 
-char pairingBuf[40] = "PET-001-8K72";
+// ช่องกรอก Pairing Code ใน WiFiManager ต้องเป็น global เพื่อไม่ให้ pointer หายตอนเปิด portal
+char pairingBuf[40] = "";
 WiFiManagerParameter custom_pairing("pairing", "Pairing Code", pairingBuf, 39);
 
 RTC_DS3231 rtc;
 Servo feedServo;
 VL53L0X tankSensor;
 TFT_eSPI tft = TFT_eSPI();
-XPT2046_Touchscreen ts(TOUCH_CS);  
+XPT2046_Touchscreen ts(TOUCH_CS);
 
 HX711_ADC LoadCell_BowlWater(HX_BowlWater_DT, HX_BowlWater_SCK);
 HX711_ADC LoadCell_TankWater(HX_TankWater_DT, HX_TankWater_SCK);
@@ -148,18 +152,19 @@ HX711_ADC LoadCell_BowlFood(HX_BowlFood_DT, HX_BowlFood_SCK);
 // ==========================================
 // 💾 หมวดที่ 6: GLOBAL VARIABLES (ตัวแปรส่วนกลาง)
 // ==========================================
-const char* websocket_server_host = "34.45.167.7";  
-const uint16_t server_port = 4000;     
+const char* websocket_server_host = "34.45.167.7";
+const uint16_t server_port = 4000;
 
 Preferences prefs;
 
-String pairingCode = "PET-001-8K72";
-String deviceId = "PET-001";
-String mainToken = "PET-001-8K72";
-String camToken = "PET-001-8K72";
+// ค่าเหล่านี้จะถูกโหลดจาก Preferences หลังผู้ใช้กรอก Pairing Code ครั้งแรก
+String pairingCode = "";
+String deviceId = "";
+String mainToken = "";
+String camToken = "";
 
 const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 7 * 3600;  
+const long gmtOffset_sec = 7 * 3600;
 const int daylightOffset_sec = 0;
 
 unsigned long lastWebSocketSend = 0;
@@ -170,7 +175,13 @@ bool wifiStatus = false;
 int lastNetStatus = -1;  // 0 = no WiFi, 1 = WiFi only, 2 = WiFi + Server
 bool ntpStarted = false;
 
-bool maintenanceMode = false;  
+float lastFeedProgressWeight = 0;
+unsigned long lastFeedProgressTime = 0;
+
+int lastWaterProgressWeight = 0;
+unsigned long lastWaterProgressTime = 0;
+
+bool maintenanceMode = false;
 int actionButton = 0;
 unsigned long actionStartTime = 0;
 unsigned long startDelayScreen = 0;
@@ -184,19 +195,19 @@ int camSendCount = 0;
 unsigned long lastCamSendTime = 0;
 String camPendingPacket = "";
 
-FeedingTime schedules[3];  
-int editIdx = 0;           
-int confirmMode = 0;       
-int deleteIdx = 0;         
+FeedingTime schedules[3];
+int editIdx = 0;
+int confirmMode = 0;
+int deleteIdx = 0;
 
-int limitBowlFood = 100;  
-int bowlFood = 0;         
-int tankFood = 0;       
+int limitBowlFood = 100;
+int bowlFood = 0;
+int tankFood = 0;
 int lastValidTankFood = 0;
 bool tankSensorReady = false;
-  
+
 int manualFeedAmount = 1;
-float feedTargetWeight = 0;  
+float feedTargetWeight = 0;
 bool petAteTrigger = false;
 bool forceUpdateTank = false;
 
@@ -204,13 +215,13 @@ FeederState feedState = IDLE;
 unsigned long feedTimer = 0;
 unsigned long stopTimer = 0;
 
-int limitBowlWater = 100;  
-int bowlWater = 0;         
-int tankWater = 0;         
-int lastDrinkWeight = 0;   
+int limitBowlWater = 100;
+int bowlWater = 0;
+int tankWater = 0;
+int lastDrinkWeight = 0;
 int tempFeedAmount = 10;
-const int waterTankMax = 2000;  
-const int waterTankMin = 0;     
+const int waterTankMax = 2000;
+const int waterTankMin = 0;
 
 WaterState waterState = WATER_IDLE;
 unsigned long pumpTimer = 0;
@@ -269,27 +280,25 @@ void loadSettings() {
 
 String makeDeviceIdFromPairingCode(String code) {
   code.trim();
-
-  int lastDash = code.lastIndexOf('-');
-
-  if (lastDash > 0) {
-    return code.substring(0, lastDash);
-  }
-
   return code;
 }
 
 void buildTokensFromPairingCode(String code) {
   code.trim();
 
-  if (code.length() == 0) {
-    code = "PET-001-8K72";
+  pairingCode = code;
+
+  // ถ้ายังไม่ได้ตั้ง Pairing Code ให้ล้างค่า device/token ทั้งหมด
+  if (pairingCode.length() == 0) {
+    deviceId = "";
+    mainToken = "";
+    camToken = "";
+    return;
   }
 
-  pairingCode = code;
-  deviceId = makeDeviceIdFromPairingCode(code);
+  deviceId = makeDeviceIdFromPairingCode(pairingCode);
 
-  // ใช้ token เดียวกันทั้ง Main และ Camera
+  // ใช้ Pairing Code เป็น token เดียวกันทั้ง Main และ Camera แล้วแยกหน้าที่ด้วย role
   mainToken = pairingCode;
   camToken = pairingCode;
 }
@@ -297,31 +306,45 @@ void buildTokensFromPairingCode(String code) {
 void loadPairingConfig() {
   prefs.begin("device_cfg", true);
 
-  pairingCode = prefs.getString("pairing", "PET-001-8K72");
+  // ถ้ายังไม่เคยบันทึก Pairing Code ให้ใช้ค่าว่าง เพื่อบังคับกรอกครั้งแรก
+  pairingCode = prefs.getString("pairing", "");
 
   prefs.end();
 
   buildTokensFromPairingCode(pairingCode);
 
-  DEBUG_PRINTLN("Pairing Code Loaded");
-  DEBUG_PRINTLN("Device ID: " + deviceId);
+  if (pairingCode.length() == 0) {
+    DEBUG_PRINTLN("⚠️ Pairing Code not set");
+  } else {
+    DEBUG_PRINTLN("Pairing Code Loaded");
+    DEBUG_PRINTLN("Device ID: " + deviceId);
+  }
 }
 
-void savePairingConfig(String newPairingCode) {
+bool savePairingConfig(String newPairingCode) {
   newPairingCode.trim();
 
   if (newPairingCode.length() == 0) {
-    return;
+    DEBUG_PRINTLN("❌ Pairing Code is empty. Not saved.");
+    return false;
   }
 
   prefs.begin("device_cfg", false);
-  prefs.putString("pairing", newPairingCode);
+  size_t saved = prefs.putString("pairing", newPairingCode);
   prefs.end();
+
+  if (saved == 0) {
+    DEBUG_PRINTLN("❌ Failed to save Pairing Code to Preferences");
+    return false;
+  }
 
   buildTokensFromPairingCode(newPairingCode);
 
-  DEBUG_PRINTLN("Pairing Code Saved");
+  DEBUG_PRINTLN("✅ Pairing Code Saved");
   DEBUG_PRINTLN("Device ID: " + deviceId);
+  DEBUG_PRINTLN("Token: " + mainToken);
+
+  return true;
 }
 
 // ============================================================================
@@ -359,11 +382,28 @@ void syncSystemTimeFromRtc() {
 }
 
 void syncRtcFromNtp() {
+  if (!checkRtc) return;
+
   struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-                        timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
+
+  // timeout สั้น ๆ กันค้าง
+  if (getLocalTime(&timeinfo, 200)) {
+    rtc.adjust(DateTime(timeinfo.tm_year + 1900,
+                        timeinfo.tm_mon + 1,
+                        timeinfo.tm_mday,
+                        timeinfo.tm_hour,
+                        timeinfo.tm_min,
+                        timeinfo.tm_sec));
+
     rtcBoot = true;
+
+    DEBUG_PRINTLN("✅ RTC Synced from NTP");
+    DEBUG_PRINTF("RTC Time: %02d:%02d:%02d\n",
+                 timeinfo.tm_hour,
+                 timeinfo.tm_min,
+                 timeinfo.tm_sec);
+  } else {
+    DEBUG_PRINTLN("⚠️ NTP time not ready yet, RTC not synced");
   }
 }
 
@@ -532,7 +572,7 @@ void resetWiFi() {
 
   client.close();
   WiFi.disconnect(true, true);
-  delay(500);  
+  delay(500);
 
   digitalWrite(PUMP_PIN, LOW);
   feedServo.detach();
@@ -546,7 +586,7 @@ void resetWiFi() {
   delay(100);
 
   wm.resetSettings();
-  delay(500);  
+  delay(500);
 
   DEBUG_PRINTLN(">>> Rebooting ESP32...");
   ESP.restart();
@@ -645,76 +685,146 @@ void startWifi() {
   loadPairingConfig();
 
   pairingCode.toCharArray(pairingBuf, sizeof(pairingBuf));
+  custom_pairing.setValue(pairingBuf, 39);
+
   wm.addParameter(&custom_pairing);
 
-  wm.setAPCallback(configModeCallback);
-  wm.setConfigPortalTimeout(120);
 
-  bool connected = wm.autoConnect("Smart Pet Feeder");
+  wm.setAPCallback(configModeCallback);  // ใช้ callback กับ autoConnect ได้ตามเวอร์ชันที่ทดสอบแล้ว
 
-  if (connected) {
-    String newPairingCode = custom_pairing.getValue();
+  bool pairingRequired = (pairingCode.length() == 0);
+  bool connected = false;
 
-    if (newPairingCode.length() > 0) {
-      savePairingConfig(newPairingCode);
+  if (pairingRequired) {
+    DEBUG_PRINTLN("⚠️ Pairing Code not found. Config Portal required.");
+
+    wm.setConfigPortalTimeout(300);
+
+    connected = wm.autoConnect("Smart Pet Feeder");
+
+    if (!connected) {
+      DEBUG_PRINTLN("⚠️ Config Portal timeout. Pairing Code still required.");
+
+      tft.fillScreen(TFT_BLACK);
+      drawCenteredText("Pairing Code", 80, 2, TFT_RED, TFT_BLACK);
+      drawCenteredText("Required!", 110, 2, TFT_RED, TFT_BLACK);
+      drawCenteredText("Open WiFi Setup", 150, 2, TFT_YELLOW, TFT_BLACK);
+
+      delay(3000);
+      ESP.restart();
     }
 
-    DEBUG_PRINTLN("✅ WiFi Connected");
-    DEBUG_PRINT("IP Address: ");
-    DEBUG_PRINTLN(WiFi.localIP());
+    String newPairingCode = custom_pairing.getValue();
+    newPairingCode.trim();
 
-    client.close();
-    delay(100);
+    if (newPairingCode.length() == 0) {
+      DEBUG_PRINTLN("❌ Pairing Code required!");
 
-    wifiStatus = true;
+      tft.fillScreen(TFT_BLACK);
+      drawCenteredText("Pairing Code", 90, 2, TFT_RED, TFT_BLACK);
+      drawCenteredText("Required!", 120, 2, TFT_RED, TFT_BLACK);
 
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-    ntpStarted = true;
+      delay(3000);
+      ESP.restart();
+    }
 
-    wifiConnectedTime = millis();
-    postWifiActionPending = true;
-    postWifiCamSent = false;
-    postWifiTankRequested = false;
+    if (!savePairingConfig(newPairingCode)) {
+      DEBUG_PRINTLN("❌ Failed to save Pairing Code");
+
+      tft.fillScreen(TFT_BLACK);
+      drawCenteredText("Save Token", 90, 2, TFT_RED, TFT_BLACK);
+      drawCenteredText("Failed!", 120, 2, TFT_RED, TFT_BLACK);
+
+      delay(3000);
+      ESP.restart();
+    }
 
   } else {
-    DEBUG_PRINTLN("⚠️ WiFi not connected. Starting OFFLINE MODE...");
+    DEBUG_PRINTLN("✅ Pairing Code already saved. AutoConnect...");
 
-    wifiStatus = false;
-    lastNetStatus = -1;
-    ntpStarted = false;
-    rtcBoot = false;
+    wm.setConfigPortalTimeout(120);
 
-    client.close();
+    connected = wm.autoConnect("Smart Pet Feeder");
 
-    WiFi.disconnect(false, false);
-    WiFi.mode(WIFI_OFF);
-    delay(300);
+    if (!connected) {
+      DEBUG_PRINTLN("⚠️ WiFi not connected. Starting OFFLINE MODE...");
 
-    if (checkRtc) {
-      syncSystemTimeFromRtc();
+      wifiStatus = false;
+      lastNetStatus = -1;
+      ntpStarted = false;
+      rtcBoot = false;
+
+      client.close();
+
+      WiFi.disconnect(false, false);
+      WiFi.mode(WIFI_OFF);
+      delay(300);
+
+      if (checkRtc) {
+        syncSystemTimeFromRtc();
+      }
+
+      forceUpdateTank = true;
+      return;
     }
 
-    forceUpdateTank = true;
+    String newPairingCode = custom_pairing.getValue();
+    newPairingCode.trim();
+
+    if (newPairingCode.length() > 0 && newPairingCode != pairingCode) {
+      if (!savePairingConfig(newPairingCode)) {
+        DEBUG_PRINTLN("❌ Failed to update Pairing Code");
+      }
+    }
   }
+
+  DEBUG_PRINTLN("✅ WiFi Connected");
+  DEBUG_PRINT("IP Address: ");
+  DEBUG_PRINTLN(WiFi.localIP());
+
+  client.close();
+  delay(100);
+
+  wifiStatus = true;
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  ntpStarted = true;
+  rtcBoot = false;
+
+  // ให้ RTC sync จาก NTP ทันทีหลัง WiFi ต่อได้
+  syncRtcFromNtp();
+
+  wifiConnectedTime = millis();
+  postWifiActionPending = true;
+  postWifiCamSent = false;
+  postWifiTankRequested = false;
 }
 
 void checkInternetConnection(unsigned long currentTime) {
   if (WiFi.status() == WL_CONNECTED) {
 
-    // อัปเดตสถานะ WiFi ภายในระบบทันที ไม่ต้องรอ 60 วินาที
+    // อัปเดตสถานะ WiFi ภายในระบบทันที
     // หมายเหตุ: ไอคอนสีเขียวจริงจะขึ้นเมื่อ WebSocket/server พร้อมใน checkStatusWifi()
     wifiStatus = true;
 
     if (!ntpStarted) {
       configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
       ntpStarted = true;
+      rtcBoot = false;  // ให้รู้ว่ายังต้อง sync RTC จาก NTP
     }
 
-    // sync RTC จาก NTP เป็นรอบ ๆ เพื่อไม่ให้ทำงานถี่เกินไป
+    // ถ้า RTC ยังไม่เคย sync หลังต่อ WiFi ให้ sync ทันที
+    // ไม่ต้องรอ END_DELAY_NET_CHECK
+    if (checkRtc && !rtcBoot) {
+      syncRtcFromNtp();
+    }
+
+    // ใช้เป็น timer รอบยาว เผื่ออยาก sync ซ้ำในอนาคต
     if (currentTime - startDelayNetCheck >= END_DELAY_NET_CHECK) {
       startDelayNetCheck = currentTime;
 
-      if (checkRtc && !rtcBoot) {
+      // ถ้าต้องการ sync ซ้ำทุก 5 นาที ให้เปิดบรรทัดนี้
+      if (checkRtc) {
         syncRtcFromNtp();
       }
     }
@@ -744,11 +854,11 @@ void checkStatusWifi() {
   int netStatus = 0;
 
   if (WiFi.status() != WL_CONNECTED) {
-    netStatus = 0;   // แดง = ไม่มี WiFi
+    netStatus = 0;  // แดง = ไม่มี WiFi
   } else if (client.available()) {
-    netStatus = 2;   // เขียว = WiFi + Server/WebSocket พร้อม
+    netStatus = 2;  // เขียว = WiFi + Server/WebSocket พร้อม
   } else {
-    netStatus = 1;   // เหลือง = WiFi ต่อได้ แต่ server ยังไม่ต่อ
+    netStatus = 1;  // เหลือง = WiFi ต่อได้ แต่ server ยังไม่ต่อ
   }
 
   if (netStatus == lastNetStatus) return;
@@ -1097,7 +1207,11 @@ void startFeeding(int value, FeedMode mode, unsigned long now) {
   feedServo.attach(SERVO_PIN);
   feedServo.write(SPEED_FWD);
   feedState = FORWARD;
+
+  // เริ่มจับเวลาแบบ no-progress timeout
   feedTimer = now;
+  lastFeedProgressTime = now;
+  lastFeedProgressWeight = currentWeight;
 }
 
 void processFeeder(unsigned long now) {
@@ -1112,8 +1226,17 @@ void processFeeder(unsigned long now) {
 
   switch (feedState) {
     case FORWARD:
-      if (realNow - feedTimer > FEED_TIMEOUT_MS) {
-        DEBUG_PRINTLN("!!! Timeout !!!");
+      // ถ้าน้ำหนักอาหารเพิ่มขึ้น แปลว่าอาหารยังลงอยู่ ให้รีเซ็ตเวลา timeout
+      if (currentWeight > lastFeedProgressWeight + FOOD_PROGRESS_GAP) {
+        lastFeedProgressWeight = currentWeight;
+        lastFeedProgressTime = realNow;
+
+        DEBUG_PRINTLN(">>> Food weight increased. Reset feed timeout.");
+      }
+
+      // ถ้าน้ำหนักไม่เพิ่มนานเกิน FEED_TIMEOUT_MS ให้หยุด servo
+      if (realNow - lastFeedProgressTime > FEED_TIMEOUT_MS) {
+        DEBUG_PRINTLN("!!! Feed Timeout: Food weight not increasing !!!");
         feedServo.write(SPEED_STOP);
         stopTimer = realNow;
         feedState = FINISH;
@@ -1124,7 +1247,7 @@ void processFeeder(unsigned long now) {
       if (currentWeight >= feedTargetWeight) {
         if (targetReachedTime == 0) {
           targetReachedTime = realNow;
-        } else if (realNow - targetReachedTime > 300) {  
+        } else if (realNow - targetReachedTime > 300) {
           DEBUG_PRINTLN(">>> Target Reached and Stable!");
           feedServo.write(SPEED_STOP);
           stopTimer = realNow;
@@ -1181,7 +1304,7 @@ void processWater(unsigned long now) {
       if (LoadCell_BowlWater.getData() < -15.0) {
         waterWaitTimer = now;
         DEBUG_PRINTLN("!!! Water Bowl Missing! Pump Paused. !!!");
-      } else if (bowlWater < lastDrinkWeight - 5) {  
+      } else if (bowlWater < lastDrinkWeight - 5) {
         waterWaitTimer = now;
         lastDrinkWeight = bowlWater;
         DEBUG_PRINTLN(">>> Pet is still drinking. Timer reset.");
@@ -1191,7 +1314,12 @@ void processWater(unsigned long now) {
       } else if (now - waterWaitTimer >= WATER_REFILL_DELAY_MS) {
         DEBUG_PRINTLN(">>> Starting Pump...");
         digitalWrite(PUMP_PIN, HIGH);
+
+        // เริ่มจับเวลาแบบ no-progress timeout
         pumpTimer = now;
+        lastWaterProgressTime = now;
+        lastWaterProgressWeight = bowlWater;
+
         waterState = WATER_PUMPING;
       }
       break;
@@ -1224,10 +1352,21 @@ void processWater(unsigned long now) {
           default: drawHomePage(); break;
         }
 
-      } else if (now - pumpTimer > WATER_TIMEOUT_MS) {
-        DEBUG_PRINTLN("!!! Water Pump Timeout! Force Stop. !!!");
-        digitalWrite(PUMP_PIN, LOW);
-        waterState = WATER_IDLE;
+      } else {
+        // ถ้าน้ำหนักน้ำเพิ่มขึ้น แปลว่าน้ำยังไหลอยู่ ให้รีเซ็ตเวลา timeout
+        if (bowlWater > lastWaterProgressWeight + WATER_PROGRESS_GAP) {
+          lastWaterProgressWeight = bowlWater;
+          lastWaterProgressTime = now;
+
+          DEBUG_PRINTLN(">>> Water weight increased. Reset pump timeout.");
+        }
+
+        // ถ้าน้ำหนักน้ำไม่เพิ่มนานเกิน WATER_TIMEOUT_MS ให้ปิดปั๊ม
+        if (now - lastWaterProgressTime > WATER_TIMEOUT_MS) {
+          DEBUG_PRINTLN("!!! Water Pump Timeout: Water weight not increasing !!!");
+          digitalWrite(PUMP_PIN, LOW);
+          waterState = WATER_IDLE;
+        }
       }
       break;
   }
@@ -1339,6 +1478,17 @@ void drawHomePage() {
   lastTimeStr = "";
   lastNetStatus = -1;
   forceUpdateTank = true;
+}
+
+void drawCenteredText(String text, int y, int textSize, uint16_t color, uint16_t bg) {
+  tft.setTextSize(textSize);
+  tft.setTextColor(color, bg);
+
+  int16_t x = (320 - (text.length() * 6 * textSize)) / 2;
+  if (x < 0) x = 0;
+
+  tft.setCursor(x, y);
+  tft.print(text);
 }
 
 void drawMenuPage() {
@@ -2112,27 +2262,27 @@ void checkTouch(unsigned long now) {
         actionStartTime = now;
       }
     } else if (currentPage == 7) {
-        if (y > 200) {
-          backButtonEffect();
-          actionButton = 15;
-          actionStartTime = now;
+      if (y > 200) {
+        backButtonEffect();
+        actionButton = 15;
+        actionStartTime = now;
 
-        } else if (x > 60 && x < 260 && y > 90 && y < 130) {
-          // LOCK / UNLOCK
-          tft.fillRect(60, 90, 200, 40, TFT_WHITE);
-          actionButton = 70;
-          actionStartTime = now;
+      } else if (x > 60 && x < 260 && y > 90 && y < 130) {
+        // LOCK / UNLOCK
+        tft.fillRect(60, 90, 200, 40, TFT_WHITE);
+        actionButton = 70;
+        actionStartTime = now;
 
-        } else if (x > 60 && x < 260 && y > 145 && y < 185) {
-            // FACTORY RESET
-            tft.fillRect(60, 145, 200, 40, TFT_WHITE);
-            tft.setTextColor(TFT_BLACK, TFT_WHITE);
-            tft.setTextSize(2);
-            tft.setCursor(83, 157);
-            tft.print("FACTORY RESET");
+      } else if (x > 60 && x < 260 && y > 145 && y < 185) {
+        // FACTORY RESET
+        tft.fillRect(60, 145, 200, 40, TFT_WHITE);
+        tft.setTextColor(TFT_BLACK, TFT_WHITE);
+        tft.setTextSize(2);
+        tft.setCursor(83, 157);
+        tft.print("FACTORY RESET");
 
-            actionButton = 71;
-            actionStartTime = now;
+        actionButton = 71;
+        actionStartTime = now;
       }
     }
   }
@@ -2431,7 +2581,7 @@ void setup() {
     client.close();  // ปิด WebSocket เพื่อคืน RAM
   });
   ArduinoOTA.begin();
-  
+
   drawHomePage();
 
   // ตั้งค่า Load Cell
