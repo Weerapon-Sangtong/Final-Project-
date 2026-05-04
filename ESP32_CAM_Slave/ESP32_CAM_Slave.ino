@@ -129,7 +129,7 @@ void connectToWiFi(String ssid, String pass) {
   if (ssid == currentSSID && (WiFi.status() == WL_CONNECTED || isConnectingWiFi)) return;
 
   client.close();
-  delay(300);
+  delay(100);
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
@@ -141,7 +141,7 @@ void connectToWiFi(String ssid, String pass) {
               IPAddress(0, 0, 0, 0));
 
   WiFi.disconnect();
-  delay(300);
+  delay(100);
 
   WiFi.begin(ssid.c_str(), pass.c_str());
 
@@ -240,7 +240,7 @@ void processCameraStream(unsigned long now) {
       DEBUG_PRINTLN(">>> 🌐 Connecting to Camera WebSocket...");
 
       client.close();
-      delay(300);
+      delay(50);
 
       if (client.connect(server_ip, server_port, "/")) {
         client.onMessage(onMessageCallback);
