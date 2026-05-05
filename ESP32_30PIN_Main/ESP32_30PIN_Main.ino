@@ -71,7 +71,7 @@ const unsigned long WATER_REFILL_DELAY_MS = 60000;
 const int WATER_DETECT_GAP = 50;
 const unsigned long WATER_TIMEOUT_MS = 20000;
 
-const int FOOD_PROGRESS_GAP = 5;   // ถ้าอาหารเพิ่มเกิน 5g ถือว่ามีความคืบหน้า
+const int FOOD_PROGRESS_GAP = 5;    // ถ้าอาหารเพิ่มเกิน 5g ถือว่ามีความคืบหน้า
 const int WATER_PROGRESS_GAP = 10;  // ถ้าน้ำเพิ่มเกิน 10ml ถือว่ามีความคืบหน้า
 
 const int TANK_EMPTY = 450;
@@ -194,6 +194,10 @@ bool camSendActive = false;
 int camSendCount = 0;
 unsigned long lastCamSendTime = 0;
 String camPendingPacket = "";
+
+bool scheduleSyncPending = false;
+unsigned long lastScheduleSyncTry = 0;
+const unsigned long SCHEDULE_SYNC_RETRY_INTERVAL = 5000;
 
 FeedingTime schedules[3];
 int editIdx = 0;
@@ -891,6 +895,58 @@ void checkStatusWifi() {
 // ======================= 🔌 หมวดที่ 12: WEBSOCKET / SERVER MESSAGE =======================
 // ============================================================================
 
+String buildScheduleRaw() {
+  String raw = "";
+
+  for (int i = 0; i < 3; i++) {
+    if (schedules[i].active) {
+      if (raw.length() > 0) {
+        raw += ";";
+      }
+
+      char item[20];
+      sprintf(item, "%02d:%02d:%d", schedules[i].hour, schedules[i].minute, schedules[i].gram);
+      raw += String(item);
+    }
+  }
+
+  return raw;
+}
+
+void sendScheduleSyncToServer() {
+  if (WiFi.status() != WL_CONNECTED || !client.available()) {
+    return;
+  }
+
+  String raw = buildScheduleRaw();
+
+  String json = "{\"type\":\"sync_schedule_from_esp\","
+                "\"deviceId\":\""
+                + deviceId + "\","
+                             "\"role\":\"main\","
+                             "\"token\":\""
+                + mainToken + "\","
+                              "\"raw\":\""
+                + raw + "\"}";
+
+  client.send(json);
+
+  DEBUG_PRINTLN("📤 Synced Schedule to Server: " + json);
+
+  scheduleSyncPending = false;
+}
+
+void processScheduleSync(unsigned long now) {
+  if (!scheduleSyncPending) return;
+
+  if (WiFi.status() != WL_CONNECTED || !client.available()) return;
+
+  if (now - lastScheduleSyncTry < SCHEDULE_SYNC_RETRY_INTERVAL) return;
+  lastScheduleSyncTry = now;
+
+  sendScheduleSyncToServer();
+}
+
 void parseScheduleFromWebSocket(String raw) {
   for (int i = 0; i < 3; i++) {
     schedules[i].active = false;
@@ -1042,7 +1098,23 @@ void handleWebSocket(unsigned long now) {
 
       client.onMessage(onMessageCallback);
 
-      client.send("{\"type\":\"register\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\"}");
+      // ต้อง register ก่อน เพื่อให้ server รู้ว่า connection นี้คือบอร์ด main
+      String regJson = "{\"type\":\"register\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\"}";
+      client.send(regJson);
+      DEBUG_PRINTLN("📤 Registered to Server: " + regJson);
+
+      if (scheduleSyncPending) {
+        // ถ้ามีการแก้ schedule ตอน offline
+        // ห้ามดึง schedule จาก server มาทับ ให้รอ processScheduleSync() ส่ง schedule ในเครื่องขึ้น server
+        DEBUG_PRINTLN("⚠️ Local schedule pending. Will sync ESP schedule to server.");
+
+      } else {
+        // ถ้าไม่ได้แก้ schedule ตอน offline ค่อยขอ schedule ล่าสุดจาก server
+        String reqJson = "{\"type\":\"request_schedule\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\"}";
+        client.send(reqJson);
+        DEBUG_PRINTLN("📤 Requested Schedule from Server: " + reqJson);
+      }
+
     } else {
       DEBUG_PRINTLN("❌ WebSocket Connect Failed");
     }
@@ -2358,6 +2430,12 @@ void executePendingAction(unsigned long now) {
           schedules[deleteIdx].active = false;
 
           saveSettings();
+
+          // มีการลบ schedule ในเครื่องแล้ว
+          // ถ้าตอนนี้ offline ให้รอ sync ขึ้น server ตอนกลับมา online
+          scheduleSyncPending = true;
+          lastScheduleSyncTry = 0;
+
           drawCheckSetTime();
 
         } else if (confirmMode == 3) {
@@ -2431,14 +2509,30 @@ void executePendingAction(unsigned long now) {
       case 48:
         schedules[editIdx].active = true;
         saveSettings();
-        DEBUG_PRINTF("Saved Slot %d: %02d:%02d (%ds)\n", editIdx + 1, schedules[editIdx].hour, schedules[editIdx].minute, schedules[editIdx].gram);
+
+        // มีการเพิ่ม/แก้ schedule ในเครื่องแล้ว
+        // ถ้าตอนนี้ offline ให้รอ sync ขึ้น server ตอนกลับมา online
+        scheduleSyncPending = true;
+        lastScheduleSyncTry = 0;
+
+        DEBUG_PRINTF("Saved Slot %d: %02d:%02d (%dg)\n",
+                     editIdx + 1,
+                     schedules[editIdx].hour,
+                     schedules[editIdx].minute,
+                     schedules[editIdx].gram);
+
         if (WiFi.status() == WL_CONNECTED && client.available()) {
           char timeStr[6];
           sprintf(timeStr, "%02d:%02d", schedules[editIdx].hour, schedules[editIdx].minute);
+
           String json = "{\"type\":\"add_schedule_from_esp\", \"deviceId\":\"" + deviceId + "\", \"role\":\"main\", \"token\":\"" + mainToken + "\", \"time\":\"" + String(timeStr) + "\", \"duration\":" + String(schedules[editIdx].gram) + ", \"slot\":" + String(editIdx + 1) + "}";
+
           client.send(json);
           DEBUG_PRINTLN("📤 Synced Schedule to Server: " + json);
+        } else {
+          DEBUG_PRINTLN("⚠️ Schedule saved offline. Will sync when WebSocket reconnects.");
         }
+
         drawMenuPage();
         break;
       case 49:
@@ -2635,6 +2729,7 @@ void loop() {
   handleCameraSync(currentTime);
   processCamSerialSend(currentTime);
   handleWebSocket(currentTime);
+  processScheduleSync(currentTime);
 
   // --- 7. Debug ระบบ ---
   // checkESP32_RAM(currentTime);
