@@ -1409,7 +1409,7 @@ void processSchedule(unsigned long now) {
     if (schedules[i].active) {
       if (currentHour == schedules[i].hour && currentMinute == schedules[i].minute && currentSecond < 2) {
         DEBUG_PRINTF(">>> Schedule #%d Triggered at %02d:%02d (%dg)\n", i + 1, currentHour, currentMinute, schedules[i].gram);
-        startFeeding(schedules[i].gram, FILL_UP_TO, now);
+        startFeeding(schedules[i].gram, ADD_MORE, now);
       }
     }
   }
